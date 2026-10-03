@@ -1126,8 +1126,12 @@ class TransactionManager {
    *   Monthly summaries sorted newest-first by month.
    */
   getMonthlySummaries() {
+    // Resolve the active category list once so seeding and the category guard
+    // both iterate the same dynamic set (built-ins + customs).
+    const categories = this.getActiveCategories();
+
     // Keyed by "YYYY-MM"; each entry holds the running month total plus a
-    // per-category cents map seeded with every known category at zero.
+    // per-category cents map seeded with every active category at zero.
     const monthsByKey = {};
 
     for (const transaction of this.transactions) {
@@ -1138,7 +1142,7 @@ class TransactionManager {
       if (
         !Number.isInteger(amount) ||
         amount < 0 ||
-        !TransactionManager.CATEGORIES.includes(transaction.category)
+        !categories.includes(transaction.category)
       ) {
         continue;
       }
@@ -1153,7 +1157,7 @@ class TransactionManager {
       // Lazily create the month bucket with every category seeded to zero.
       if (!monthsByKey[monthKey]) {
         const categoryTotals = {};
-        for (const category of TransactionManager.CATEGORIES) {
+        for (const category of categories) {
           categoryTotals[category] = 0;
         }
 
@@ -1183,7 +1187,7 @@ class TransactionManager {
         monthKey: bucket.monthKey,
         label: bucket.label,
         totalCents: bucket.totalCents,
-        categoryTotals: TransactionManager.CATEGORIES.map((category) => ({
+        categoryTotals: categories.map((category) => ({
           category,
           totalCents: bucket.categoryTotals[category]
         }))
@@ -1543,13 +1547,34 @@ class TransactionListComponent {
   /**
    * @param {string} containerElementId - The id of the list container element
    *        (e.g. "transactions-container").
+   * @param {(name: string) => string} [colorResolver] - Resolves a category
+   *        name to its assigned hex color, used to set the badge background so
+   *        arbitrary (custom) categories color correctly without per-name CSS.
    */
-  constructor(containerElementId) {
+  constructor(containerElementId, colorResolver) {
     // Reference to the container that holds rendered transaction elements.
     this.container = document.getElementById(containerElementId);
 
     // Reference to the empty-state message shown when there are no transactions.
     this.emptyState = document.getElementById('empty-state');
+
+    // Category -> color resolver for data-driven badge backgrounds.
+    this.colorResolver =
+      typeof colorResolver === 'function' ? colorResolver : null;
+  }
+
+  /**
+   * Resolve a category's badge color via the injected resolver, falling back to
+   * grey when no resolver is wired or the name is unknown.
+   *
+   * @param {string} name - Category name
+   * @returns {string} Hex color
+   */
+  resolveColor(name) {
+    if (this.colorResolver) {
+      return this.colorResolver(name) || '#CCCCCC';
+    }
+    return '#CCCCCC';
   }
 
   /**
@@ -1578,9 +1603,12 @@ class TransactionListComponent {
     name.textContent = transaction.itemName;
 
     const category = document.createElement('span');
-    // Category-specific class (e.g. category-Food) drives the color-coding.
-    category.className = `transaction-category category-${transaction.category}`;
+    // Shared badge class carries shape/typography; the background color is set
+    // inline from the category's assigned color so arbitrary (custom) category
+    // names color correctly without needing a per-name CSS class.
+    category.className = 'transaction-category category-badge';
     category.textContent = transaction.category;
+    category.style.backgroundColor = this.resolveColor(transaction.category);
 
     info.appendChild(name);
     info.appendChild(category);
@@ -1712,13 +1740,34 @@ class MonthlySummaryComponent {
   /**
    * @param {string} containerElementId - The id of the container that holds the
    *        rendered month cards (e.g. "monthly-summary-container").
+   * @param {(name: string) => string} [colorResolver] - Resolves a category
+   *        name to its assigned hex color, used to set each chip's background
+   *        so custom categories color correctly without per-name CSS.
    */
-  constructor(containerElementId) {
+  constructor(containerElementId, colorResolver) {
     // Container that holds the rendered month cards.
     this.container = document.getElementById(containerElementId);
 
     // Empty-state message shown when there are no transactions.
     this.emptyState = document.getElementById('monthly-summary-empty-state');
+
+    // Category -> color resolver for data-driven chip backgrounds.
+    this.colorResolver =
+      typeof colorResolver === 'function' ? colorResolver : null;
+  }
+
+  /**
+   * Resolve a category's chip color via the injected resolver, falling back to
+   * grey when no resolver is wired or the name is unknown.
+   *
+   * @param {string} name - Category name
+   * @returns {string} Hex color
+   */
+  resolveColor(name) {
+    if (this.colorResolver) {
+      return this.colorResolver(name) || '#CCCCCC';
+    }
+    return '#CCCCCC';
   }
 
   /**
@@ -1727,8 +1776,9 @@ class MonthlySummaryComponent {
    * All values are written via textContent (never innerHTML) so nothing from a
    * transaction can be interpreted as markup. The month total and each category
    * breakdown amount are formatted through the shared formatCurrency() helper so
-   * display matches the rest of the app. Each category chip reuses the existing
-   * `category-${category}` color classes.
+   * display matches the rest of the app. Each category chip uses the shared
+   * `category-badge` class with its background color set inline from the
+   * category's assigned color.
    *
    * @param {{monthKey: string, label: string, totalCents: number,
    *   categoryTotals: Array<{category: string, totalCents: number}>}} summary
@@ -1762,9 +1812,12 @@ class MonthlySummaryComponent {
 
     for (const entry of summary.categoryTotals) {
       const chip = document.createElement('span');
-      // Reuse the existing category color classes for consistent color-coding.
-      chip.className = `monthly-category category-${entry.category}`;
+      // Shared badge class carries shape/typography; the background color is
+      // set inline from the category's assigned color so custom categories
+      // color correctly without a per-name CSS class.
+      chip.className = 'monthly-category category-badge';
       chip.textContent = `${entry.category}: ${formatCurrency(entry.totalCents)}`;
+      chip.style.backgroundColor = this.resolveColor(entry.category);
       breakdown.appendChild(chip);
     }
 
@@ -2022,11 +2075,17 @@ class BalanceDisplayComponent {
  * tasks (11.2–11.8).
  */
 class ChartComponent {
+  // Fallback slice color for an unresolved category (matches CategoryManager).
+  static FALLBACK_COLOR = '#CCCCCC';
+
   /**
    * @param {string} canvasElementId - The id of the <canvas> element the chart
    *        renders into (e.g. "expense-chart").
+   * @param {(name: string) => string} [colorResolver] - Resolves a category
+   *        name to its assigned hex color so pie slices match the badges. When
+   *        omitted, every slice falls back to grey.
    */
-  constructor(canvasElementId) {
+  constructor(canvasElementId, colorResolver) {
     // Reference to the canvas the Chart.js instance draws on.
     this.canvasElement = document.getElementById(canvasElementId);
 
@@ -2036,13 +2095,24 @@ class ChartComponent {
     // Reference to the empty-state message shown when all categories are zero.
     this.emptyState = document.getElementById('chart-empty-state');
 
-    // Fixed color per category so the pie's slices stay consistent across
-    // renders (matches the category colors defined in design.md and the CSS).
-    this.categoryColors = {
-      Food: '#FF6384',
-      Transport: '#36A2EB',
-      Fun: '#FFCE56',
-    };
+    // Resolver that maps a category name to its assigned color. Slices use this
+    // so they stay in sync with the badge colors for arbitrary categories.
+    this.colorResolver =
+      typeof colorResolver === 'function' ? colorResolver : null;
+  }
+
+  /**
+   * Resolve a category's slice color via the injected resolver, falling back to
+   * grey when no resolver is wired or the name is unknown.
+   *
+   * @param {string} name - Category name
+   * @returns {string} Hex color
+   */
+  resolveColor(name) {
+    if (this.colorResolver) {
+      return this.colorResolver(name) || ChartComponent.FALLBACK_COLOR;
+    }
+    return ChartComponent.FALLBACK_COLOR;
   }
 
   /**
@@ -2089,8 +2159,8 @@ class ChartComponent {
     // category to its fixed color (falling back to grey for unknowns).
     const labels = categoryTotals.map((entry) => entry.category);
     const data = categoryTotals.map((entry) => entry.totalCents);
-    const backgroundColor = categoryTotals.map(
-      (entry) => this.categoryColors[entry.category] || '#CCCCCC'
+    const backgroundColor = categoryTotals.map((entry) =>
+      this.resolveColor(entry.category)
     );
 
     // Read the active theme's colors at build time so a chart created while in
@@ -2196,7 +2266,7 @@ class ChartComponent {
       (entry) => entry.totalCents
     );
     this.chartInstance.data.datasets[0].backgroundColor = categoryTotals.map(
-      (entry) => this.categoryColors[entry.category] || '#CCCCCC'
+      (entry) => this.resolveColor(entry.category)
     );
     this.chartInstance.update('none');
   }
@@ -2287,9 +2357,12 @@ class UIManager {
   /**
    * @param {TransactionManager} transactionManager - Data layer used for all
    *   transaction reads/writes and aggregate calculations.
+   * @param {CategoryManager} categoryManager - Owns the active category list,
+   *   colors, and add/delete logic. Drives the dropdown and manage UI.
    */
-  constructor(transactionManager) {
+  constructor(transactionManager, categoryManager) {
     this.transactionManager = transactionManager;
+    this.categoryManager = categoryManager;
 
     // Child components are created in initialize() (once the DOM is ready),
     // so they start out null here.
@@ -2312,16 +2385,23 @@ class UIManager {
   /**
    * Creates the child components, binds their event handlers, wires the global
    * error banner's close button, and performs the first render (Req 3.1).
-   *
-   * @returns {void}
-   */
   initialize() {
+    // Shared category color resolver passed into the color-aware components so
+    // badges and chart slices stay in sync with CategoryManager.
+    const resolveColor = (name) => this.categoryManager.getCategoryColor(name);
+
     // Instantiate each child component against its DOM element ID.
     this.inputForm = new InputFormComponent('transaction-form');
-    this.transactionList = new TransactionListComponent('transactions-container');
-    this.monthlySummary = new MonthlySummaryComponent('monthly-summary-container');
+    this.transactionList = new TransactionListComponent(
+      'transactions-container',
+      resolveColor
+    );
+    this.monthlySummary = new MonthlySummaryComponent(
+      'monthly-summary-container',
+      resolveColor
+    );
     this.balanceDisplay = new BalanceDisplayComponent('balance-amount');
-    this.chartComponent = new ChartComponent('expense-chart');
+    this.chartComponent = new ChartComponent('expense-chart', resolveColor);
 
     // Route component events into our handlers. bind(this) preserves the
     // UIManager context when the handlers run from the components' listeners.
@@ -2334,7 +2414,331 @@ class UIManager {
       errorCloseButton.addEventListener('click', () => this.dismissError());
     }
 
+    // Cache the category UI elements and wire the inline add + manage flows.
+    this.cacheCategoryElements();
+    this.bindCategoryUI();
+
+    // Re-render the dropdown and manage list on every category change from one
+    // source of truth. refreshAll() is called by the add/delete handlers so
+    // totals/chart/badges also update.
+    this.categoryManager.onChange(() => {
+      this.renderCategoryOptions();
+      this.renderManageList();
+    });
+
+    // Initial dropdown + manage-list render from the active list.
+    this.renderCategoryOptions();
+    this.renderManageList();
+
     // Render the current state so the UI reflects any persisted data.
+    this.refreshAll();
+  }
+
+  /**
+   * Cache references to the category dropdown, inline add-category group, and
+   * manage-categories panel so the handlers avoid repeated DOM lookups.
+   *
+   * @returns {void}
+   */
+  cacheCategoryElements() {
+    this.categorySelect = document.getElementById('category');
+    this.newCategoryGroup = document.getElementById('new-category-group');
+    this.newCategoryInput = document.getElementById('new-category-name');
+    this.newCategoryConfirm = document.getElementById('new-category-confirm');
+    this.newCategoryCancel = document.getElementById('new-category-cancel');
+    this.newCategoryError = document.getElementById('new-category-error');
+
+    this.manageToggle = document.getElementById('category-manage-toggle');
+    this.managePanel = document.getElementById('category-manage-panel');
+    this.manageList = document.getElementById('category-manage-list');
+    this.manageMessage = document.getElementById('category-manage-message');
+
+    // Remembers the selection to restore to when the user cancels the add flow.
+    this.previousCategoryValue = '';
+  }
+
+  /**
+   * Bind the inline add-category flow and the manage-categories disclosure.
+   *
+   * @returns {void}
+   */
+  bindCategoryUI() {
+    if (this.categorySelect) {
+      // Selecting the sentinel reveals the inline input; any other selection
+      // records the value so a later add-cancel can restore it.
+      this.categorySelect.addEventListener('change', () => {
+        if (this.categorySelect.value === CategoryManager.ADD_NEW_SENTINEL) {
+          this.showAddCategoryInput();
+        } else {
+          this.previousCategoryValue = this.categorySelect.value;
+        }
+      });
+    }
+
+    if (this.newCategoryConfirm) {
+      this.newCategoryConfirm.addEventListener('click', () =>
+        this.confirmAddCategory()
+      );
+    }
+
+    if (this.newCategoryCancel) {
+      this.newCategoryCancel.addEventListener('click', () =>
+        this.cancelAddCategory()
+      );
+    }
+
+    if (this.newCategoryInput) {
+      // Enter confirms, Escape cancels — keep the flow fully keyboard-operable.
+      this.newCategoryInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          this.confirmAddCategory();
+        } else if (event.key === 'Escape') {
+          event.preventDefault();
+          this.cancelAddCategory();
+        }
+      });
+    }
+
+    if (this.manageToggle && this.managePanel) {
+      this.manageToggle.addEventListener('click', () => {
+        const isHidden = this.managePanel.classList.toggle('is-hidden');
+        this.manageToggle.setAttribute('aria-expanded', isHidden ? 'false' : 'true');
+      });
+    }
+
+    if (this.manageList) {
+      // Delegated delete handler covers current and future delete buttons.
+      this.manageList.addEventListener('click', (event) => {
+        const button = event.target.closest('.btn-delete');
+        if (!button || !this.manageList.contains(button)) {
+          return;
+        }
+        const name = button.dataset.category;
+        if (name) {
+          this.handleDeleteCategory(name);
+        }
+      });
+    }
+  }
+
+  /**
+   * Render the category <select> options from the active list: the blank
+   * placeholder first, every active category, then the "+ Add new category…"
+   * sentinel last. Preserves the current selection when it still exists.
+   *
+   * @returns {void}
+   */
+  renderCategoryOptions() {
+    if (!this.categorySelect) {
+      return;
+    }
+
+    const previous = this.categorySelect.value;
+    const active = this.categoryManager.getActiveCategories();
+
+    // Rebuild options via DOM APIs (no innerHTML) so names stay safely escaped.
+    this.categorySelect.textContent = '';
+
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = 'Select category';
+    this.categorySelect.appendChild(placeholder);
+
+    for (const name of active) {
+      const option = document.createElement('option');
+      option.value = name;
+      option.textContent = name;
+      this.categorySelect.appendChild(option);
+    }
+
+    const addNew = document.createElement('option');
+    addNew.value = CategoryManager.ADD_NEW_SENTINEL;
+    addNew.textContent = '+ Add new category\u2026';
+    this.categorySelect.appendChild(addNew);
+
+    // Restore the prior selection if it is still a valid, non-sentinel value.
+    if (
+      previous &&
+      previous !== CategoryManager.ADD_NEW_SENTINEL &&
+      active.includes(previous)
+    ) {
+      this.categorySelect.value = previous;
+    }
+  }
+
+  /**
+   * Reveal the inline add-category input, clear it, and move focus to it.
+   *
+   * @returns {void}
+   */
+  showAddCategoryInput() {
+    if (!this.newCategoryGroup || !this.newCategoryInput) {
+      return;
+    }
+    if (this.newCategoryError) {
+      this.newCategoryError.textContent = '';
+    }
+    this.newCategoryInput.value = '';
+    this.newCategoryGroup.classList.remove('is-hidden');
+    this.newCategoryInput.focus();
+  }
+
+  /**
+   * Validate and add the typed category. On success it is persisted, selected,
+   * and the inline input hidden; on failure an inline error is shown and the
+   * input stays open for correction.
+   *
+   * @returns {void}
+   */
+  confirmAddCategory() {
+    if (!this.newCategoryInput) {
+      return;
+    }
+
+    const name = this.newCategoryInput.value;
+    const result = this.categoryManager.addCategory(name);
+
+    if (!result.ok) {
+      if (this.newCategoryError) {
+        this.newCategoryError.textContent = result.error;
+      }
+      this.newCategoryInput.setAttribute('aria-invalid', 'true');
+      this.newCategoryInput.focus();
+      return;
+    }
+
+    // onChange re-rendered the options; select the new category and close.
+    this.hideAddCategoryInput();
+    if (this.categorySelect) {
+      this.categorySelect.value = result.name;
+      this.previousCategoryValue = result.name;
+    }
+
+    // Reflect the new (zero-total) category in totals/chart immediately.
+    this.refreshAll();
+  }
+
+  /**
+   * Cancel the add flow: hide the input and restore the previous selection
+   * (which is never the sentinel).
+   *
+   * @returns {void}
+   */
+  cancelAddCategory() {
+    this.hideAddCategoryInput();
+    if (this.categorySelect) {
+      this.categorySelect.value =
+        this.previousCategoryValue &&
+        this.previousCategoryValue !== CategoryManager.ADD_NEW_SENTINEL
+          ? this.previousCategoryValue
+          : '';
+    }
+  }
+
+  /**
+   * Hide the inline add-category input and clear its error/invalid state.
+   *
+   * @returns {void}
+   */
+  hideAddCategoryInput() {
+    if (this.newCategoryGroup) {
+      this.newCategoryGroup.classList.add('is-hidden');
+    }
+    if (this.newCategoryError) {
+      this.newCategoryError.textContent = '';
+    }
+    if (this.newCategoryInput) {
+      this.newCategoryInput.removeAttribute('aria-invalid');
+    }
+  }
+
+  /**
+   * Render the manage-categories list: one row per CUSTOM category with a
+   * delete button. Built-ins are never listed. Shows a hint when there are no
+   * custom categories yet.
+   *
+   * @returns {void}
+   */
+  renderManageList() {
+    if (!this.manageList) {
+      return;
+    }
+
+    this.manageList.textContent = '';
+    if (this.manageMessage) {
+      this.manageMessage.textContent = '';
+    }
+
+    const customs = this.categoryManager.getCustomCategories();
+
+    if (customs.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'empty-state';
+      empty.textContent = 'No custom categories yet.';
+      this.manageList.appendChild(empty);
+      return;
+    }
+
+    const fragment = document.createDocumentFragment();
+    for (const category of customs) {
+      const row = document.createElement('div');
+      row.className = 'category-manage-row';
+
+      const swatch = document.createElement('span');
+      swatch.className = 'category-badge category-manage-swatch';
+      swatch.textContent = category.name;
+      swatch.style.backgroundColor = category.color;
+
+      const deleteButton = document.createElement('button');
+      deleteButton.type = 'button';
+      deleteButton.className = 'btn-delete';
+      deleteButton.dataset.category = category.name;
+      deleteButton.setAttribute('aria-label', `Delete ${category.name} category`);
+
+      const deleteIcon = document.createElement('span');
+      deleteIcon.setAttribute('aria-hidden', 'true');
+      deleteIcon.textContent = '\u00d7';
+      deleteButton.appendChild(deleteIcon);
+
+      row.appendChild(swatch);
+      row.appendChild(deleteButton);
+      fragment.appendChild(row);
+    }
+
+    this.manageList.appendChild(fragment);
+  }
+
+  /**
+   * Handle a delete request for a custom category. Blocks deletion when any
+   * transaction still uses the category; otherwise deletes, persists, and
+   * refreshes the UI.
+   *
+   * @param {string} name - Custom category name to delete
+   * @returns {void}
+   */
+  handleDeleteCategory(name) {
+    // Build the set of categories currently in use from the transactions.
+    const usedCategorySet = new Set(
+      this.transactionManager.getTransactions().map((t) => t.category)
+    );
+
+    if (!this.categoryManager.isDeletable(name, usedCategorySet)) {
+      if (this.manageMessage) {
+        this.manageMessage.textContent = usedCategorySet.has(name)
+          ? `Cannot delete "${name}" while transactions use it.`
+          : `"${name}" cannot be deleted.`;
+      }
+      return;
+    }
+
+    const deleted = this.categoryManager.deleteCategory(name);
+    if (!deleted) {
+      this.showError('Could not delete the category. Please try again.');
+      return;
+    }
+
+    // onChange re-rendered the dropdown/manage list; refresh totals/chart too.
     this.refreshAll();
   }
 
@@ -2357,7 +2761,8 @@ class UIManager {
     const validation = TransactionManager.validateTransaction(
       itemName,
       amount,
-      category
+      category,
+      this.categoryManager.getActiveCategories()
     );
     if (!validation.valid) {
       this.inputForm.showValidationErrors(validation.errors);
@@ -2474,9 +2879,23 @@ class UIManager {
    * @returns {void}
    */
   handleStorageChange(event) {
+    if (!event) {
+      return;
+    }
+
+    // Another tab changed custom categories: reload them and re-render the
+    // dropdown/manage list, then refresh totals/chart (Req 2.4).
+    if (event.key === CategoryManager.STORAGE_KEY) {
+      this.categoryManager.initialize();
+      this.renderCategoryOptions();
+      this.renderManageList();
+      this.refreshAll();
+      return;
+    }
+
     // The storage event fires for every key in the origin; ignore any change
     // that is not our transaction data (Req 2.4).
-    if (!event || event.key !== StorageManager.STORAGE_KEY) {
+    if (event.key !== StorageManager.STORAGE_KEY) {
       return;
     }
 
@@ -2577,13 +2996,19 @@ function initApp() {
       return;
     }
 
-    // Build the data layer first: load persisted transactions before any UI
-    // exists so the initial render reflects the saved state.
-    const transactionManager = new TransactionManager(StorageManager);
+    // Build the data layer first: load persisted categories and transactions
+    // before any UI exists so the initial render reflects the saved state.
+    const categoryManager = new CategoryManager(StorageManager);
+    categoryManager.initialize();
+
+    const transactionManager = new TransactionManager(
+      StorageManager,
+      categoryManager
+    );
     transactionManager.initialize();
 
     // Build the UI layer on top of the data layer and bind all event handlers.
-    uiManager = new UIManager(transactionManager);
+    uiManager = new UIManager(transactionManager, categoryManager);
     uiManager.initialize();
 
     // Initialize theming after the UI (and chart) exist so the initial theme

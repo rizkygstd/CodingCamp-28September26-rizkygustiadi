@@ -61,17 +61,63 @@
                 
                 <div class="form-group">
                     <label for="category">Category</label>
+                    <!--
+                      Options are rendered by UIManager.renderCategoryOptions()
+                      on load and whenever categories change: the blank
+                      placeholder first, every active category, then the
+                      "+ Add new category…" sentinel option last.
+                    -->
                     <select id="category" name="category" required aria-describedby="category-error">
                         <option value="">Select category</option>
-                        <option value="Food">Food</option>
-                        <option value="Transport">Transport</option>
-                        <option value="Fun">Fun</option>
                     </select>
                     <span class="error-message" id="category-error" role="alert"></span>
+
+                    <!--
+                      Inline add-category group, revealed when the user picks the
+                      "+ Add new category…" option. Hidden by default via the
+                      shared is-hidden utility. Keyboard-operable: a text input
+                      plus confirm/cancel buttons and a role="alert" error span.
+                    -->
+                    <div id="new-category-group" class="new-category-group is-hidden">
+                        <label for="new-category-name" class="sr-only">New category name</label>
+                        <input
+                            type="text"
+                            id="new-category-name"
+                            name="newCategoryName"
+                            maxlength="30"
+                            autocomplete="off"
+                            aria-describedby="new-category-error"
+                        />
+                        <div class="new-category-actions">
+                            <button type="button" id="new-category-confirm" class="btn-primary new-category-btn">Add</button>
+                            <button type="button" id="new-category-cancel" class="btn-secondary new-category-btn">Cancel</button>
+                        </div>
+                        <span class="error-message" id="new-category-error" role="alert"></span>
+                    </div>
                 </div>
                 
                 <button type="submit" class="btn-primary">Add Transaction</button>
             </form>
+
+            <!--
+              Manage categories disclosure: a toggle button reveals a region
+              listing CUSTOM categories (built-ins are never deletable). Each
+              row offers a delete affordance; in-use deletion is blocked with a
+              message in #category-manage-message.
+            -->
+            <div class="category-manage">
+                <button
+                    type="button"
+                    id="category-manage-toggle"
+                    class="btn-secondary"
+                    aria-expanded="false"
+                    aria-controls="category-manage-panel"
+                >Manage categories</button>
+                <div id="category-manage-panel" class="category-manage-panel is-hidden">
+                    <div id="category-manage-list"></div>
+                    <p id="category-manage-message" class="error-message" role="alert"></p>
+                </div>
+            </div>
         </section>
         
         <!-- Transaction list section -->

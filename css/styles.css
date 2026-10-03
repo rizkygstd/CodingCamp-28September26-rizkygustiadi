@@ -45,10 +45,12 @@
     /* Success colors */
     --color-success: #047857;
     
-    /* Category colors - 3:1 contrast ratio (Requirement 10.5) */
-    --color-food: #dc2626;         /* Red */
-    --color-transport: #2563eb;    /* Blue */
-    --color-fun: #7c3aed;          /* Purple */
+    /* Category badge colors are no longer CSS custom properties: each badge's
+       background is set inline by JS from the category's assigned palette color
+       (see CategoryManager.PALETTE / BUILT_IN_COLORS in js/app.js), so custom
+       categories color correctly without a per-name CSS rule. The built-ins
+       keep their established look — Food #dc2626 red, Transport #2563eb blue,
+       Fun #7c3aed purple — all white-text legible (>=4.5:1) in both themes. */
     
     /* UI component sizes */
     --min-touch-target: 44px;      /* Requirement 10.9 */
@@ -95,11 +97,12 @@
     /* Success */
     --color-success: #34d399;
 
-    /* Category badge colors are intentionally left at their light-theme values.
-       Badges use WHITE text, so these must keep >=4.5:1 against white
-       (#dc2626 ~4.68:1, #2563eb ~4.68:1, #7c3aed ~5.96:1). Brightening them for
-       the dark surface would drop white-text contrast below AA, so they are
-       inherited unchanged — they already read legibly on the dark background. */
+    /* Category badge colors are set inline by JS (not theme tokens) and are
+       intentionally identical in both themes. Badges use WHITE text, so every
+       palette color keeps >=4.5:1 against white (e.g. #dc2626 ~4.68:1, #2563eb
+       ~4.68:1, #7c3aed ~5.96:1). Brightening them for the dark surface would
+       drop white-text contrast below AA, so they stay as-is — they already read
+       legibly on the dark background. */
 
     /* Deeper shadows read better over dark surfaces */
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
@@ -410,19 +413,15 @@ section h2 {
     letter-spacing: 0.5px;
 }
 
-.category-Food {
-    background-color: var(--color-food);
+/* Data-driven badge coloring: JS sets each badge's background-color inline from
+   the category's assigned palette color (built-in or custom), so arbitrary
+   category names color correctly without a per-name CSS class. All palette
+   colors are verified >=4.5:1 against white text, so white text holds AA in
+   both themes. forced-color-adjust keeps the inline background in forced-colors
+   mode so the badge stays legible. */
+.category-badge {
     color: white;
-}
-
-.category-Transport {
-    background-color: var(--color-transport);
-    color: white;
-}
-
-.category-Fun {
-    background-color: var(--color-fun);
-    color: white;
+    forced-color-adjust: none;
 }
 
 .transaction-actions {
@@ -658,14 +657,131 @@ section[aria-label="Monthly spending summary"] {
     gap: var(--spacing-sm);
 }
 
-/* Category chips reuse the .category-Food/Transport/Fun color rules (white text
-   on the category color), styled like .transaction-category badges. */
+/* Category chips carry the shared .category-badge class (white text + inline
+   background set by JS from the category's color), styled like the
+   .transaction-category badges. */
 .monthly-category {
     display: inline-block;
     padding: 2px var(--spacing-sm);
     border-radius: 12px;
     font-size: 12px;
     font-weight: 600;
+    letter-spacing: 0.5px;
+}
+
+/* ==============================================
+   Custom Categories: inline add-category flow + manage UI
+   Reuses the existing form tokens (8px spacing scale, 44px touch targets,
+   focus-visible rings handled by the global rules) so the new controls match
+   the rest of the form in both themes. No hardcoded colors — all values come
+   from the shared custom properties.
+   ============================================== */
+
+/* Secondary button variant used by Cancel and the Manage-categories toggle:
+   same shape/sizing as .btn-primary but a neutral, outlined surface so it
+   reads as the lower-emphasis action. */
+.btn-secondary {
+    background-color: var(--color-background);
+    color: var(--color-text);
+    font-size: var(--font-size-base);
+    font-weight: 600;
+    padding: var(--button-padding);
+    border: 2px solid var(--color-border);
+    border-radius: 4px;
+    cursor: pointer;
+    min-height: var(--min-touch-target);
+    min-width: var(--min-touch-target);
+    transition: background-color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.btn-secondary:hover {
+    border-color: var(--color-primary);
+    background-color: var(--color-background-alt);
+}
+
+.btn-secondary:focus {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+}
+
+/* Inline add-category group shown under the category select. Stacks the input
+   above its confirm/cancel buttons, matching the .form-group rhythm. */
+.new-category-group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-sm);
+    margin-top: var(--spacing-sm);
+    padding: var(--spacing-sm);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    background-color: var(--color-background);
+}
+
+.new-category-group input {
+    padding: var(--spacing-sm);
+    font-size: var(--font-size-base);
+    font-family: inherit;
+    border: 2px solid var(--color-border);
+    border-radius: 4px;
+    background-color: var(--color-background);
+    color: var(--color-text);
+    min-height: var(--min-touch-target);
+    transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.new-category-group input:focus {
+    outline: none;
+    border-color: var(--color-border-focus);
+    box-shadow: var(--shadow-focus);
+}
+
+.new-category-actions {
+    display: flex;
+    gap: var(--spacing-sm);
+}
+
+/* Buttons sit side-by-side and share the row width equally. */
+.new-category-btn {
+    flex: 1;
+    width: auto;
+}
+
+/* Manage-categories disclosure placed after the form. */
+.category-manage {
+    margin-top: var(--spacing-md);
+}
+
+.category-manage-panel {
+    margin-top: var(--spacing-sm);
+    padding: var(--spacing-sm);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    background-color: var(--color-background);
+}
+
+/* One row per custom category: a colored name swatch and a delete button,
+   mirroring the .transaction-item layout. */
+.category-manage-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--spacing-md);
+    padding: var(--spacing-sm) 0;
+}
+
+.category-manage-row:not(:last-child) {
+    border-bottom: 1px solid var(--color-border);
+}
+
+/* The swatch reuses .category-badge (white text + inline background from JS)
+   with the badge shape so it reads like the list/chart badges. */
+.category-manage-swatch {
+    display: inline-block;
+    padding: 2px var(--spacing-sm);
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
     letter-spacing: 0.5px;
 }
 
@@ -717,9 +833,9 @@ a:focus-visible,
      --color-text-secondary (#666666) on white: 5.74:1 ✓
      --color-error (#c72020) on white:    6.9:1  ✓
      --color-primary (#0066cc) on white:  4.56:1 ✓
-     --color-food (#dc2626) on white:     4.68:1 ✓  (badge bg — white text on it: 4.68:1 ✓)
-     --color-transport (#2563eb) on white: 4.68:1 ✓
-     --color-fun (#7c3aed) on white:      5.96:1 ✓
+     Category badge palette (white text on the badge bg, all >=4.5:1):
+       #dc2626 4.68:1, #2563eb 4.68:1, #7c3aed 5.96:1, #047857 4.54:1,
+       #b45309 4.52:1, #be185d 5.41:1, #0f766e 4.76:1, #4338ca 7.0:1 ✓
    ----------------------------------------------- */
 
 /* Guarantee sufficient contrast for secondary text used in empty states
