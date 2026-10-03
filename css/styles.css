@@ -76,8 +76,8 @@
     /* Surfaces */
     --color-background: #121212;        /* app background */
     --color-background-alt: #1e1e1e;    /* cards / form / chart section */
-    --color-border: #3a3a3a;            /* ~3:1 against #121212 for UI edges */
-    --color-border-focus: #4d9fff;      /* brighter blue focus ring on dark */
+    --color-border: #6b6b6b;            /* 3.52:1 against #121212 — meets 3:1 UI */
+    --color-border-focus: #4d9fff;      /* brighter blue focus ring on dark (6.89:1) */
 
     /* Text — verified contrast on the dark surfaces above */
     --color-text: #eaeaea;              /* ~14:1 on #121212 */
@@ -88,18 +88,18 @@
     --color-primary-hover: #4285f4;
 
     /* Error — lighter red reads on dark; bg/border tuned for the dark surface */
-    --color-error: #f87171;             /* ~5.6:1 on #121212 */
+    --color-error: #f87171;             /* 6.77:1 on #121212 */
     --color-error-bg: #2a1517;
     --color-error-border: #b91c1c;
 
     /* Success */
     --color-success: #34d399;
 
-    /* Category badge colors — brightened so white badge text keeps contrast
-       and the hues stay legible on dark backgrounds. */
-    --color-food: #ef4444;              /* Red */
-    --color-transport: #3b82f6;         /* Blue */
-    --color-fun: #a855f7;               /* Purple */
+    /* Category badge colors are intentionally left at their light-theme values.
+       Badges use WHITE text, so these must keep >=4.5:1 against white
+       (#dc2626 ~4.68:1, #2563eb ~4.68:1, #7c3aed ~5.96:1). Brightening them for
+       the dark surface would drop white-text contrast below AA, so they are
+       inherited unchanged — they already read legibly on the dark background. */
 
     /* Deeper shadows read better over dark surfaces */
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
@@ -601,6 +601,75 @@ section[aria-label="Spending distribution chart"] {
 }
 
 /* ==============================================
+   Monthly Summary Section Styles
+   Spending grouped by calendar month. Reuses the existing design tokens and
+   the category color classes so the section matches the transaction list and
+   tracks the active theme automatically (no hardcoded colors).
+   ============================================== */
+
+/* Section container matches the chart section surface for visual consistency. */
+section[aria-label="Monthly spending summary"] {
+    background-color: var(--color-background-alt);
+    padding: var(--spacing-lg);
+    border-radius: 8px;
+    box-shadow: var(--shadow-sm);
+}
+
+/* Each month card mirrors the .transaction-item card look. */
+.monthly-summary-month {
+    padding: var(--spacing-md);
+    margin-bottom: var(--spacing-sm);
+    background-color: var(--color-background);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    box-shadow: var(--shadow-sm);
+}
+
+.monthly-summary-month:last-child {
+    margin-bottom: 0;
+}
+
+/* Header row: month label on the left, month total on the right. */
+.monthly-summary-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: var(--spacing-md);
+    margin-bottom: var(--spacing-sm);
+}
+
+.monthly-summary-label {
+    font-weight: 600;
+    color: var(--color-text);
+    font-size: var(--font-size-base);
+}
+
+.monthly-summary-total {
+    font-weight: 700;
+    color: var(--color-text);
+    font-size: var(--font-size-base);
+    white-space: nowrap;
+}
+
+/* Breakdown row: wrap the category chips so they stack on narrow screens. */
+.monthly-summary-breakdown {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--spacing-sm);
+}
+
+/* Category chips reuse the .category-Food/Transport/Fun color rules (white text
+   on the category color), styled like .transaction-category badges. */
+.monthly-category {
+    display: inline-block;
+    padding: 2px var(--spacing-sm);
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+
+/* ==============================================
    Task 3.7: Accessibility Styles
    Requirements: 10.5, 10.10
    ============================================== */
@@ -794,6 +863,13 @@ a:focus-visible,
     .transaction-actions {
         width: 100%;
         justify-content: space-between;
+    }
+    
+    /* Stack the month label and total on narrow screens, like transaction items */
+    .monthly-summary-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: var(--spacing-xs);
     }
     
     /* Chart fills full width on tablet/mobile */

@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>verify</title>
+</head>
+<body>
+<div id="out"></div>
+<script>
+// Minimal Chart stub so app.js (which references Chart) does not throw if used.
+window.Chart = function () { return { update() {}, destroy() {} }; };
+</script>
+<script src="js/app.js"></script>
+<script>
+// Standalone verification of the pure business logic in getMonthlySummaries().
+// Uses an in-memory fake storage so nothing touches real localStorage.
+(function () {
+  const results = [];
+  function log(name, pass, detail) {
+    results.push((pass ? 'PASS' : 'FAIL') + ' :: ' + name + (detail ? ' :: ' + detail : ''));
+  }
+
+  // Timestamps in local time for distinct months.
+  const tOct = new Date(2026, 9, 15, 12, 0, 0).getTime();  // Oct 2026
+  const tOct2 = new Date(2026, 9, 20, 9, 0, 0).getTime();  // Oct 2026
+  const tSep = new Date(2026, 8, 10, 8, 0, 0).getTime();   // Sep 2026
+  const tAug = new Date(2026, 7, 1, 0, 0, 0).getTime();    // Aug 2026
+
+  const sample = [
+    { id: 'a', itemName: 'Lunch', amount: 1250, category: 'Food', timestamp: tOct },
+    { id: 'b', itemName: 'Bus', amount: 300, category: 'Transport', timestamp: tOct2 },
+    { id: 'c', itemName: 'Movie', amount: 1500, category: 'Fun', timestamp: tSep },
+    { id: 'd', itemName: 'Snacks', amount: 500, category: 'Food', timestamp: tSep },
+    { id: 'e', itemName: 'Old', amount: 999, category: 'Food', timestamp: tAug },
+    // corrupted entries that must be excluded:
+    { id: 'f', itemName: 'BadFloat', amount: 12.5, category: 'Food', timestamp: tOct },
+    { id: 'g', itemName: 'BadNeg', amount: -400, category: 'Fun', timestamp: tOct },
+    { id: 'h', itemName: 'BadCat', amount: 700, category: 'Nope', timestamp: tOct }
+  ];
+
+  const fakeStorage = {
+    loadTransactions() { return sample.slice(); },
+    saveTransactions() { return true; }
+  };
+
+  const tm = new TransactionManager(fakeStorage);
+  tm.initialize();
+  const s = tm.getMonthlySummaries();
+
+  // 3 months expected (Oct, Sep, Aug 2026)
+  log('month count = 3', s.length === 3, 'got ' + s.length);
+
+  // Newest-first ordering by monthKey
+  log('newest-first order', s[0].monthKey === '2026-10' && s[1].monthKey === '2026-09' && s[2].monthKey === '2026-08',
+      s.map(m => m.monthKey).join(','));
+
+  // Labels en-US
+  log('labels en-US', s[0].label === 'October 2026' && s[1].label === 'September 2026' && s[2].label === 'August 2026',
+      s.map(m => m.label).join(' | '));
+
+  // Oct total = 1250 + 300 = 1550 (floats/neg/badcat excluded)
+  const oct = s[0];
+  log('Oct total = 1550', oct.totalCents === 1550, 'got ' + oct.totalCents);
+
+  // Each month has all 3 categories in canonical order
+  const cats = oct.categoryTotals.map(c => c.category).join(',');
+  log('all 3 categories canonical order', cats === 'Food,Transport,Fun', cats);
+
+  // Oct per-category: Food 1250, Transport 300, Fun 0
+  const octFood = oct.categoryTotals.find(c => c.category === 'Food').totalCents;
+  const octTrans = oct.categoryTotals.find(c => c.category === 'Transport').totalCents;
+  const octFun = oct.categoryTotals.find(c => c.category === 'Fun').totalCents;
+  log('Oct breakdown Food=1250 Transport=300 Fun=0',
+      octFood === 1250 && octTrans === 300 && octFun === 0,
+      `Food=${octFood} Transport=${octTrans} Fun=${octFun}`);
+
+  // Sep total = 1500 + 500 = 2000, and category sums equal total
+  const sep = s[1];
+  const sepSum = sep.categoryTotals.reduce((a, c) => a + c.totalCents, 0);
+  log('Sep total = 2000 and reconciles', sep.totalCents === 2000 && sepSum === 2000,
+      `total=${sep.totalCents} sum=${sepSum}`);
+
+  // formatCurrency check
+  log('formatCurrency(1550) = $15.50', formatCurrency(1550) === '$15.50', formatCurrency(1550));
+
+  // Empty store -> empty summaries
+  const tmEmpty = new TransactionManager({ loadTransactions: () => [], saveTransactions: () => true });
+  tmEmpty.initialize();
+  log('empty store -> []', tmEmpty.getMonthlySummaries().length === 0);
+
+  // Component render against DOM empty state + cards
+  // Build a container with empty-state node, like the real HTML.
+  const container = document.createElement('div');
+  container.id = 'monthly-summary-container';
+  const empty = document.createElement('p');
+  empty.id = 'monthly-summary-empty-state';
+  empty.className = 'empty-state';
+  empty.textContent = 'empty';
+  container.appendChild(empty);
+  document.body.appendChild(container);
+
+  const comp = new MonthlySummaryComponent('monthly-summary-container');
+  comp.render([]);
+  log('render([]) shows empty state', !empty.classList.contains('is-hidden'));
+  log('render([]) renders no cards', container.querySelectorAll('.monthly-summary-month').length === 0);
+
+  comp.render(s);
+  log('render(summaries) hides empty state', empty.classList.contains('is-hidden'));
+  log('render(summaries) renders 3 cards', container.querySelectorAll('.monthly-summary-month').length === 3);
+
+  // Card content for Oct: label text, total text, chip classes
+  const firstCard = container.querySelector('.monthly-summary-month');
+  const labelText = firstCard.querySelector('.monthly-summary-label').textContent;
+  const totalText = firstCard.querySelector('.monthly-summary-total').textContent;
+  const chips = firstCard.querySelectorAll('.monthly-category');
+  log('card label = October 2026', labelText === 'October 2026', labelText);
+  log('card total = $15.50', totalText === '$15.50', totalText);
+  log('card has 3 category chips with color classes',
+      chips.length === 3 &&
+      firstCard.querySelector('.monthly-category.category-Food') &&
+      firstCard.querySelector('.monthly-category.category-Transport') &&
+      firstCard.querySelector('.monthly-category.category-Fun'));
+  log('Food chip text = "Food: $12.50"', chips[0].textContent === 'Food: $12.50', chips[0].textContent);
+
+  // re-render replaces, not appends
+  comp.render(s);
+  log('re-render keeps 3 cards (no dupes)', container.querySelectorAll('.monthly-summary-month').length === 3);
+
+  const allPass = results.every(r => r.startsWith('PASS'));
+  document.getElementById('out').textContent =
+    'VERIFY_RESULT ' + (allPass ? 'ALL_PASS' : 'HAS_FAIL') + '\n' + results.join('\n');
+})();
+</script>
+</body>
+</html>

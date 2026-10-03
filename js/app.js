@@ -180,6 +180,427 @@ class StorageManager {
 }
 
 /**
+ * CategoryManager
+ *
+ * Owns the set of expense categories available to the user: the three
+ * permanent built-ins (Food, Transport, Fun) plus any custom categories the
+ * user adds. Instance-based with injected storage, mirroring
+ * TransactionManager, so category logic stays testable and persistence stays
+ * stateless. Only CUSTOM categories are persisted; built-ins are implicit and
+ * always lead the active list.
+ *
+ * Each custom category stores a stable color assigned at creation from a fixed
+ * accessible palette, so badges and chart slices share one source of truth and
+ * stay consistent across reloads even if the palette changes later.
+ *
+ * Custom category shape: { name: string, color: string } where color is a hex
+ * string legible with white text (>=4.5:1) in both themes.
+ */
+class CategoryManager {
+  // Permanent, non-deletable built-in categories; always first in the active
+  // list. Keep in sync with TransactionManager.CATEGORIES default.
+  static BUILT_INS = ['Food', 'Transport', 'Fun'];
+
+  // Local Storage key for custom categories, matching the 'expense-tracker-*'
+  // convention used by the other managers.
+  static STORAGE_KEY = 'expense-tracker-categories';
+
+  // Schema version used to support future data migrations.
+  static SCHEMA_VERSION = '1.0';
+
+  // Documented maximum length for a category name (characters, after trim).
+  static MAX_NAME_LENGTH = 30;
+
+  // Sentinel <option> value used by the dropdown to trigger the inline
+  // add-category flow. Reserved: never allowed as a real category name.
+  static ADD_NEW_SENTINEL = '__add_new__';
+
+  // Built-in colors preserve the app's established look: Food red, Transport
+  // blue, Fun purple. These match the --color-food/-transport/-fun values the
+  // CSS previously used and are white-text legible in both themes.
+  static BUILT_IN_COLORS = {
+    Food: '#dc2626',
+    Transport: '#2563eb',
+    Fun: '#7c3aed'
+  };
+
+  // Fallback color used when a category's color cannot be resolved. Grey keeps
+  // an unknown badge/slice visible without implying a real category color.
+  static FALLBACK_COLOR = '#CCCCCC';
+
+  // Accessible palette for custom categories. Every hex is verified >=4.5:1
+  // against WHITE text, so white badge text and dark-theme parity hold (same
+  // bar the CSS documents for the built-ins). The first three mirror the
+  // built-in colors; custom categories are assigned starting after them, but
+  // assignment cycles the full palette so colors stay varied.
+  static PALETTE = [
+    '#dc2626', // red (Food)
+    '#2563eb', // blue (Transport)
+    '#7c3aed', // purple (Fun)
+    '#047857', // green      (4.54:1 on white)
+    '#b45309', // amber-brown(4.52:1 on white)
+    '#be185d', // pink       (5.41:1 on white)
+    '#0f766e', // teal       (4.76:1 on white)
+    '#4338ca'  // indigo     (7.0:1 on white)
+  ];
+
+  /**
+   * @param {typeof StorageManager} storageManager - Storage dependency used
+   *        for loading and persisting custom categories. Only used for the
+   *        availability check; this class reads/writes its own key directly to
+   *        reuse the same never-throw try/catch contract.
+   */
+  constructor(storageManager) {
+    // Keep a reference to the injected persistence layer (for availability).
+    this.storageManager = storageManager;
+
+    // In-memory list of custom categories ({ name, color }); populated by
+    // initialize(). Built-ins are not stored here.
+    this.customCategories = [];
+
+    // Change listeners notified whenever the active list changes (add/delete),
+    // so the UI can re-render the dropdown and manage list from one source.
+    this.listeners = [];
+
+    // Tracks whether initialize() has run.
+    this.isInitialized = false;
+  }
+
+  /**
+   * Load custom categories from storage into memory and prepare for use.
+   * Never throws; falls back to an empty custom list on any failure.
+   *
+   * @returns {void}
+   */
+  initialize() {
+    this.customCategories = this.load();
+    this.isInitialized = true;
+  }
+
+  /**
+   * Validate the structural shape of data parsed from storage.
+   *
+   * Shallow check only; individual entries are validated in load().
+   *
+   * @param {*} data - Parsed JSON object retrieved from storage
+   * @returns {boolean} true if data has a version field and a categories array
+   */
+  static validateStoredData(data) {
+    return (
+      data !== null &&
+      typeof data === 'object' &&
+      typeof data.version !== 'undefined' &&
+      Array.isArray(data.categories)
+    );
+  }
+
+  /**
+   * Validate a single stored custom-category entry.
+   *
+   * Expected shape: { name: non-empty string, color: non-empty string }. The
+   * name must not collide (case-insensitively) with a built-in, since only
+   * customs are stored.
+   *
+   * @param {*} entry - Candidate category entry
+   * @returns {boolean} true if the entry is a well-formed custom category
+   */
+  static isValidStoredCategory(entry) {
+    if (
+      entry === null ||
+      typeof entry !== 'object' ||
+      typeof entry.name !== 'string' ||
+      entry.name.trim().length === 0 ||
+      typeof entry.color !== 'string' ||
+      entry.color.trim().length === 0
+    ) {
+      return false;
+    }
+
+    // A stored "custom" that duplicates a built-in is corrupt; drop it.
+    const lower = entry.name.trim().toLowerCase();
+    return !CategoryManager.BUILT_INS.some(
+      (builtIn) => builtIn.toLowerCase() === lower
+    );
+  }
+
+  /**
+   * Read and validate custom categories from Local Storage. Never throws;
+   * returns [] when data is missing, unparseable, or structurally invalid, and
+   * drops individual malformed/duplicate entries.
+   *
+   * @returns {Array<{name: string, color: string}>}
+   */
+  load() {
+    try {
+      const rawData = localStorage.getItem(CategoryManager.STORAGE_KEY);
+
+      // No data persisted yet is a normal first-run state, not an error.
+      if (rawData === null) {
+        return [];
+      }
+
+      const parsed = JSON.parse(rawData);
+
+      if (!CategoryManager.validateStoredData(parsed)) {
+        console.error(
+          'Stored categories have an invalid schema structure; returning no custom categories.'
+        );
+        return [];
+      }
+
+      // Keep only well-formed entries; drop case-insensitive duplicates so the
+      // active list never has two categories that compare equal.
+      const seen = new Set(
+        CategoryManager.BUILT_INS.map((name) => name.toLowerCase())
+      );
+      const valid = [];
+      for (const entry of parsed.categories) {
+        if (!CategoryManager.isValidStoredCategory(entry)) {
+          console.warn('Skipping corrupted category:', entry);
+          continue;
+        }
+        const lower = entry.name.trim().toLowerCase();
+        if (seen.has(lower)) {
+          console.warn('Skipping duplicate category:', entry);
+          continue;
+        }
+        seen.add(lower);
+        valid.push({ name: entry.name.trim(), color: entry.color.trim() });
+      }
+
+      return valid;
+    } catch (error) {
+      // Covers JSON parse errors and any storage access failures.
+      console.error('Failed to load categories from Local Storage:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Persist the current custom categories to Local Storage, wrapped in the
+   * versioned payload. Never throws; returns false on failure (e.g. quota or
+   * storage disabled) so category changes still apply in-session.
+   *
+   * @returns {boolean} true on success, false on failure
+   */
+  save() {
+    try {
+      const payload = {
+        version: CategoryManager.SCHEMA_VERSION,
+        categories: this.customCategories
+      };
+      localStorage.setItem(CategoryManager.STORAGE_KEY, JSON.stringify(payload));
+      return true;
+    } catch (error) {
+      console.error('Failed to save categories to Local Storage:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Get the active category list: built-ins first, then custom names in the
+   * order they were added.
+   *
+   * @returns {Array<string>} Active category names
+   */
+  getActiveCategories() {
+    return [
+      ...CategoryManager.BUILT_INS,
+      ...this.customCategories.map((category) => category.name)
+    ];
+  }
+
+  /**
+   * Resolve the display color for a category name.
+   *
+   * @param {string} name - Category name
+   * @returns {string} Hex color: the built-in color, the custom's stored
+   *   color, or the grey fallback when the name is unknown.
+   */
+  getCategoryColor(name) {
+    if (
+      Object.prototype.hasOwnProperty.call(
+        CategoryManager.BUILT_IN_COLORS,
+        name
+      )
+    ) {
+      return CategoryManager.BUILT_IN_COLORS[name];
+    }
+
+    const custom = this.customCategories.find(
+      (category) => category.name === name
+    );
+    return custom ? custom.color : CategoryManager.FALLBACK_COLOR;
+  }
+
+  /**
+   * Validate a proposed new category name.
+   *
+   * Rules: trim; reject empty; reject names longer than MAX_NAME_LENGTH;
+   * reject the reserved sentinel; reject case-insensitive duplicates of any
+   * active category (built-in or custom). Returns a user-facing error message.
+   *
+   * @param {string} name - Raw proposed name (may contain whitespace)
+   * @returns {{valid: boolean, error: string}} error is '' when valid
+   */
+  validateName(name) {
+    const trimmed = typeof name === 'string' ? name.trim() : '';
+
+    if (trimmed.length === 0) {
+      return { valid: false, error: 'Category name is required.' };
+    }
+
+    if (trimmed.length > CategoryManager.MAX_NAME_LENGTH) {
+      return {
+        valid: false,
+        error: `Category name must be ${CategoryManager.MAX_NAME_LENGTH} characters or fewer.`
+      };
+    }
+
+    // The sentinel is reserved for the dropdown's add-new option.
+    if (trimmed === CategoryManager.ADD_NEW_SENTINEL) {
+      return { valid: false, error: 'That category name is reserved.' };
+    }
+
+    const lower = trimmed.toLowerCase();
+    const duplicate = this.getActiveCategories().some(
+      (existing) => existing.toLowerCase() === lower
+    );
+    if (duplicate) {
+      return { valid: false, error: 'That category already exists.' };
+    }
+
+    return { valid: true, error: '' };
+  }
+
+  /**
+   * Add a new custom category after validating its name.
+   *
+   * On success assigns the next palette color (cycling when exhausted),
+   * appends it, persists, and notifies listeners. The in-memory add is kept
+   * even if persistence fails so the category is usable in-session.
+   *
+   * @param {string} name - Proposed category name (will be trimmed)
+   * @returns {{ok: boolean, error: string, name: string}} name is the trimmed
+   *   stored name on success, '' otherwise.
+   */
+  addCategory(name) {
+    const validation = this.validateName(name);
+    if (!validation.valid) {
+      return { ok: false, error: validation.error, name: '' };
+    }
+
+    const trimmed = name.trim();
+    // Assign the next color by custom-category count, cycling the palette.
+    const color =
+      CategoryManager.PALETTE[
+        this.customCategories.length % CategoryManager.PALETTE.length
+      ];
+
+    this.customCategories.push({ name: trimmed, color });
+    this.save();
+    this.notify();
+
+    return { ok: true, error: '', name: trimmed };
+  }
+
+  /**
+   * Delete a custom category by name.
+   *
+   * Built-ins can never be deleted. In-use checks are the caller's
+   * responsibility (see isDeletable); this method only enforces that the name
+   * is a known custom category. On a persistence failure the removal is rolled
+   * back so memory stays consistent with storage.
+   *
+   * @param {string} name - Category name to delete
+   * @returns {boolean} true if removed and persisted, false otherwise
+   */
+  deleteCategory(name) {
+    if (CategoryManager.BUILT_INS.includes(name)) {
+      return false;
+    }
+
+    const index = this.customCategories.findIndex(
+      (category) => category.name === name
+    );
+    if (index === -1) {
+      return false;
+    }
+
+    const [removed] = this.customCategories.splice(index, 1);
+
+    const saved = this.save();
+    if (!saved) {
+      // Roll back so memory matches the un-persisted state.
+      this.customCategories.splice(index, 0, removed);
+      return false;
+    }
+
+    this.notify();
+    return true;
+  }
+
+  /**
+   * Determine whether a category can be deleted: it must be a custom category
+   * (never a built-in) AND not currently used by any transaction.
+   *
+   * @param {string} name - Category name to test
+   * @param {Set<string>} usedCategorySet - Set of category names currently in
+   *        use by transactions
+   * @returns {boolean} true if the category may be deleted
+   */
+  isDeletable(name, usedCategorySet) {
+    if (CategoryManager.BUILT_INS.includes(name)) {
+      return false;
+    }
+    const isCustom = this.customCategories.some(
+      (category) => category.name === name
+    );
+    if (!isCustom) {
+      return false;
+    }
+    return !(usedCategorySet && usedCategorySet.has(name));
+  }
+
+  /**
+   * Get a defensive copy of the custom categories (name + color).
+   *
+   * @returns {Array<{name: string, color: string}>}
+   */
+  getCustomCategories() {
+    return this.customCategories.map((category) => ({ ...category }));
+  }
+
+  /**
+   * Register a change listener invoked after every add/delete.
+   *
+   * @param {Function} callback - Called with no arguments on change
+   * @returns {void}
+   */
+  onChange(callback) {
+    if (typeof callback === 'function') {
+      this.listeners.push(callback);
+    }
+  }
+
+  /**
+   * Notify all registered listeners of a category change. A failing listener
+   * is logged but does not prevent the others from running.
+   *
+   * @returns {void}
+   */
+  notify() {
+    for (const listener of this.listeners) {
+      try {
+        listener();
+      } catch (error) {
+        console.error('Category change listener failed:', error);
+      }
+    }
+  }
+}
+
+/**
  * ThemeManager
  *
  * Manages the light/dark color theme. Implemented as a static class to mirror
@@ -200,9 +621,12 @@ class ThemeManager {
   // Local Storage key, matching the 'expense-tracker-*' convention.
   static STORAGE_KEY = 'expense-tracker-theme';
 
-  // Icons per active theme (see convention note above).
-  static ICON_LIGHT = '🌙';
-  static ICON_DARK = '☀️';
+  // Icons per active theme (see convention note above). Written as Unicode
+  // escapes so the source stays pure ASCII and renders correctly regardless of
+  // how the file is served/decoded: \u{1F319} = 🌙 (crescent moon),
+  // \u2600\uFE0F = ☀️ (sun with emoji variation selector).
+  static ICON_LIGHT = '\u{1F319}';
+  static ICON_DARK = '\u2600\uFE0F';
 
   /**
    * Read the saved theme from Local Storage without ever throwing.
@@ -372,10 +796,17 @@ class TransactionManager {
   /**
    * @param {typeof StorageManager} storageManager - Storage dependency used
    *        for loading and persisting transactions.
+   * @param {CategoryManager} [categoryManager] - Source of the dynamic active
+   *        category list used for validation and totals. Optional so the
+   *        manager still works if constructed without one (falls back to the
+   *        static CATEGORIES).
    */
-  constructor(storageManager) {
+  constructor(storageManager, categoryManager) {
     // Keep a reference to the injected persistence layer.
     this.storageManager = storageManager;
+
+    // Source of the dynamic active category list (built-ins + customs).
+    this.categoryManager = categoryManager || null;
 
     // In-memory transaction list; populated by initialize().
     this.transactions = [];
@@ -414,9 +845,17 @@ class TransactionManager {
    * @param {string} itemName - Raw item name (may contain surrounding whitespace)
    * @param {number} amount - Amount in dollars
    * @param {string} category - Category value
+   * @param {Array<string>} [activeCategories] - The live list of valid
+   *        categories to check against. Defaults to the static CATEGORIES so
+   *        the method is safe when called without the dynamic list.
    * @returns {{valid: boolean, errors: {itemName?: string, amount?: string, category?: string}}}
    */
-  static validateTransaction(itemName, amount, category) {
+  static validateTransaction(
+    itemName,
+    amount,
+    category,
+    activeCategories = TransactionManager.CATEGORIES
+  ) {
     const errors = {};
 
     // --- Item name: required, non-empty after trimming, max length ---
@@ -449,9 +888,12 @@ class TransactionManager {
       errors.amount = 'Amount can have at most 2 decimal places.';
     }
 
-    // --- Category: must be one of the allowed values ---
-    if (!TransactionManager.CATEGORIES.includes(category)) {
-      errors.category = 'Please select a valid category: Food, Transport, or Fun.';
+    // --- Category: must be one of the active (built-in or custom) values ---
+    const validCategories = Array.isArray(activeCategories)
+      ? activeCategories
+      : TransactionManager.CATEGORIES;
+    if (!validCategories.includes(category)) {
+      errors.category = 'Please select a valid category.';
     }
 
     return {
@@ -506,10 +948,12 @@ class TransactionManager {
    */
   addTransaction(itemName, amountDollars, category) {
     // Reject invalid input up front; caller is responsible for showing errors.
+    // Validate against the dynamic active list when a CategoryManager is wired.
     const validation = TransactionManager.validateTransaction(
       itemName,
       amountDollars,
-      category
+      category,
+      this.getActiveCategories()
     );
     if (!validation.valid) {
       return null;
@@ -624,9 +1068,11 @@ class TransactionManager {
    * @returns {Array<{category: string, totalCents: number}>} Per-category totals
    */
   getCategoryTotals() {
-    // Seed each category at zero so absent categories still appear.
+    const categories = this.getActiveCategories();
+
+    // Seed each active category at zero so absent categories still appear.
     const totalsByCategory = {};
-    for (const category of TransactionManager.CATEGORIES) {
+    for (const category of categories) {
       totalsByCategory[category] = 0;
     }
 
@@ -644,10 +1090,104 @@ class TransactionManager {
       }
     }
 
-    return TransactionManager.CATEGORIES.map((category) => ({
+    return categories.map((category) => ({
       category,
       totalCents: totalsByCategory[category]
     }));
+  }
+
+  /**
+   * Resolve the active category list from the injected CategoryManager, or the
+   * static built-in list when none is wired. Centralizes the fallback so
+   * totals and validation share one definition of "active".
+   *
+   * @returns {Array<string>} Active category names
+   */
+  getActiveCategories() {
+    if (this.categoryManager) {
+      return this.categoryManager.getActiveCategories();
+    }
+    return TransactionManager.CATEGORIES;
+  }
+
+  /**
+   * Aggregate spending into per-calendar-month summaries, newest month first.
+   *
+   * Transactions are grouped by their LOCAL-time calendar month so the derived
+   * key and the human label always agree with the user's own calendar. The
+   * same defensive guard used by getTotalCents()/getCategoryTotals() excludes
+   * amounts that are not non-negative integer cents, and transactions whose
+   * category is not a known one are skipped (mirroring getCategoryTotals()).
+   * Each month always reports every known category (seeded at zero) so the
+   * view has a stable, complete shape.
+   *
+   * @returns {Array<{monthKey: string, label: string, totalCents: number,
+   *   categoryTotals: Array<{category: string, totalCents: number}>}>}
+   *   Monthly summaries sorted newest-first by month.
+   */
+  getMonthlySummaries() {
+    // Keyed by "YYYY-MM"; each entry holds the running month total plus a
+    // per-category cents map seeded with every known category at zero.
+    const monthsByKey = {};
+
+    for (const transaction of this.transactions) {
+      const amount = transaction.amount;
+
+      // Skip amounts that are not valid non-negative integer cents, and any
+      // transaction whose category is not one we recognize.
+      if (
+        !Number.isInteger(amount) ||
+        amount < 0 ||
+        !TransactionManager.CATEGORIES.includes(transaction.category)
+      ) {
+        continue;
+      }
+
+      // Derive the local-time month using the Date object's local getters so
+      // the key matches the label built from the same month below.
+      const date = new Date(transaction.timestamp);
+      const year = date.getFullYear();
+      const month = date.getMonth(); // 0-based
+      const monthKey = `${year}-${String(month + 1).padStart(2, '0')}`;
+
+      // Lazily create the month bucket with every category seeded to zero.
+      if (!monthsByKey[monthKey]) {
+        const categoryTotals = {};
+        for (const category of TransactionManager.CATEGORIES) {
+          categoryTotals[category] = 0;
+        }
+
+        monthsByKey[monthKey] = {
+          monthKey,
+          // Day 1 of the month yields a stable "October 2026"-style label.
+          label: new Intl.DateTimeFormat('en-US', {
+            year: 'numeric',
+            month: 'long'
+          }).format(new Date(year, month, 1)),
+          totalCents: 0,
+          categoryTotals
+        };
+      }
+
+      const bucket = monthsByKey[monthKey];
+      bucket.totalCents += amount;
+      bucket.categoryTotals[transaction.category] += amount;
+    }
+
+    // Project each bucket into the public shape and sort months newest-first.
+    // String comparison of the zero-padded "YYYY-MM" keys gives chronological
+    // order, so a descending sort yields newest-first.
+    return Object.values(monthsByKey)
+      .sort((a, b) => (a.monthKey < b.monthKey ? 1 : a.monthKey > b.monthKey ? -1 : 0))
+      .map((bucket) => ({
+        monthKey: bucket.monthKey,
+        label: bucket.label,
+        totalCents: bucket.totalCents,
+        categoryTotals: TransactionManager.CATEGORIES.map((category) => ({
+          category,
+          totalCents: bucket.categoryTotals[category]
+        }))
+      }));
   }
 
   /**
@@ -1157,10 +1697,165 @@ class TransactionListComponent {
    * Remove a single transaction element from the list by its id.
    *
    * Optimized path used after a delete. If no transaction items remain the
-   * empty state is shown again.
+/**
+ * MonthlySummaryComponent
+ *
+ * Renders spending grouped by calendar month, newest month first, and manages
+ * its empty state. Follows TransactionListComponent exactly: the constructor
+ * caches DOM references by id, DOM is built with createElement + a
+ * DocumentFragment (never innerHTML concatenation of transaction data), and the
+ * empty state is toggled via the shared `is-hidden` utility class. All business
+ * logic (grouping, totals, ordering) lives in TransactionManager; this class is
+ * presentation only.
+ */
+class MonthlySummaryComponent {
+  /**
+   * @param {string} containerElementId - The id of the container that holds the
+   *        rendered month cards (e.g. "monthly-summary-container").
+   */
+  constructor(containerElementId) {
+    // Container that holds the rendered month cards.
+    this.container = document.getElementById(containerElementId);
+
+    // Empty-state message shown when there are no transactions.
+    this.emptyState = document.getElementById('monthly-summary-empty-state');
+  }
+
+  /**
+   * Build the DOM element for a single month's summary.
    *
-   * @param {string} transactionId - id of the transaction to remove
+   * All values are written via textContent (never innerHTML) so nothing from a
+   * transaction can be interpreted as markup. The month total and each category
+   * breakdown amount are formatted through the shared formatCurrency() helper so
+   * display matches the rest of the app. Each category chip reuses the existing
+   * `category-${category}` color classes.
+   *
+   * @param {{monthKey: string, label: string, totalCents: number,
+   *   categoryTotals: Array<{category: string, totalCents: number}>}} summary
+   * @returns {HTMLElement} The fully built .monthly-summary-month element
+   */
+  createMonthElement(summary) {
+    // Root card element, tagged with the month key for lookups/debugging.
+    const card = document.createElement('div');
+    card.className = 'monthly-summary-month';
+    card.dataset.monthKey = summary.monthKey;
+
+    // --- Header row: month label + month total ---
+    const header = document.createElement('div');
+    header.className = 'monthly-summary-header';
+
+    const label = document.createElement('span');
+    label.className = 'monthly-summary-label';
+    label.textContent = summary.label;
+
+    const total = document.createElement('span');
+    total.className = 'monthly-summary-total';
+    // Amounts are cents; formatCurrency handles the display formatting.
+    total.textContent = formatCurrency(summary.totalCents);
+
+    header.appendChild(label);
+    header.appendChild(total);
+
+    // --- Breakdown row: one color-coded chip per category ---
+    const breakdown = document.createElement('div');
+    breakdown.className = 'monthly-summary-breakdown';
+
+    for (const entry of summary.categoryTotals) {
+      const chip = document.createElement('span');
+      // Reuse the existing category color classes for consistent color-coding.
+      chip.className = `monthly-category category-${entry.category}`;
+      chip.textContent = `${entry.category}: ${formatCurrency(entry.totalCents)}`;
+      breakdown.appendChild(chip);
+    }
+
+    card.appendChild(header);
+    card.appendChild(breakdown);
+
+    return card;
+  }
+
+  /**
+   * Render the full set of monthly summaries, replacing any existing cards.
+   *
+   * The empty-state element lives inside the container, so month cards are
+   * removed individually (rather than clearing innerHTML) to preserve the
+   * empty-state node and its reference. A DocumentFragment batches the inserts
+   * into a single reflow, mirroring TransactionListComponent.render().
+   *
+   * @param {Array<object>} summaries - Monthly summaries to display
    * @returns {void}
+   */
+  render(summaries) {
+    if (!this.container) {
+      return;
+    }
+
+    // Remove previously rendered month cards without touching the empty state.
+    this.clearMonths();
+
+    // Nothing to show: reveal the empty state and stop.
+    if (!Array.isArray(summaries) || summaries.length === 0) {
+      this.showEmptyState();
+      return;
+    }
+
+    // Build all month cards off-DOM, then append once for a single reflow.
+    const fragment = document.createDocumentFragment();
+    for (const summary of summaries) {
+      fragment.appendChild(this.createMonthElement(summary));
+    }
+
+    this.container.appendChild(fragment);
+    this.hideEmptyState();
+  }
+
+  /**
+   * Remove all rendered month cards from the container.
+   *
+   * Deliberately leaves the empty-state element in place so its reference stays
+   * valid and show/hide continues to work after a re-render.
+   *
+   * @returns {void}
+   */
+  clearMonths() {
+    if (!this.container) {
+      return;
+    }
+
+    const months = this.container.querySelectorAll('.monthly-summary-month');
+    months.forEach((month) => month.remove());
+  }
+
+  /**
+   * Show the empty-state message.
+   *
+   * Toggles the `is-hidden` CSS utility class rather than setting an inline
+   * style, keeping presentation in the stylesheet.
+   *
+   * @returns {void}
+   */
+  showEmptyState() {
+    if (this.emptyState) {
+      this.emptyState.classList.remove('is-hidden');
+    }
+  }
+
+  /**
+   * Hide the empty-state message.
+   *
+   * @returns {void}
+   */
+  hideEmptyState() {
+    if (this.emptyState) {
+      this.emptyState.classList.add('is-hidden');
+    }
+  }
+}
+
+/**
+ * BalanceDisplayComponent
+ *
+ * Renders the running total of spending in the header balance area. This is
    */
   removeTransaction(transactionId) {
     if (!this.container) {
@@ -1600,6 +2295,7 @@ class UIManager {
     // so they start out null here.
     this.inputForm = null;
     this.transactionList = null;
+    this.monthlySummary = null;
     this.balanceDisplay = null;
     this.chartComponent = null;
 
@@ -1623,6 +2319,7 @@ class UIManager {
     // Instantiate each child component against its DOM element ID.
     this.inputForm = new InputFormComponent('transaction-form');
     this.transactionList = new TransactionListComponent('transactions-container');
+    this.monthlySummary = new MonthlySummaryComponent('monthly-summary-container');
     this.balanceDisplay = new BalanceDisplayComponent('balance-amount');
     this.chartComponent = new ChartComponent('expense-chart');
 
@@ -1750,6 +2447,7 @@ class UIManager {
     const transactions = this.transactionManager.getTransactions();
     const totalCents = this.transactionManager.getTotalCents();
     const categoryTotals = this.transactionManager.getCategoryTotals();
+    const monthlySummaries = this.transactionManager.getMonthlySummaries();
 
     // Align the DOM-mutating work (full list render + balance update) to the
     // next animation frame so visual updates land in a single batched paint and
@@ -1759,6 +2457,7 @@ class UIManager {
     // (prepend / direct node removal) for the optimized paths.
     requestAnimationFrame(() => {
       this.transactionList.render(transactions);
+      this.monthlySummary.render(monthlySummaries);
       this.balanceDisplay.update(totalCents);
     });
 
