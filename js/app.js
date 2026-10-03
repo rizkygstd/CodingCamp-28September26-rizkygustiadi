@@ -180,6 +180,174 @@ class StorageManager {
 }
 
 /**
+ * ThemeManager
+ *
+ * Manages the light/dark color theme. Implemented as a static class to mirror
+ * StorageManager, since theme state is global and the methods are stateless.
+ *
+ * Behavior:
+ *  - Reads a saved preference from Local Storage key 'expense-tracker-theme'.
+ *  - On first load with no saved value, falls back to the OS preference via
+ *    prefers-color-scheme.
+ *  - Applies the theme by toggling data-theme="dark" on <html> and syncing the
+ *    toggle button's aria-pressed and icon.
+ *  - Persists the choice on toggle, guarded so storage failures never throw.
+ *
+ * Icon convention: 🌙 (moon) is shown in light mode (click to go dark); ☀️
+ * (sun) is shown in dark mode (click to go light).
+ */
+class ThemeManager {
+  // Local Storage key, matching the 'expense-tracker-*' convention.
+  static STORAGE_KEY = 'expense-tracker-theme';
+
+  // Icons per active theme (see convention note above).
+  static ICON_LIGHT = '🌙';
+  static ICON_DARK = '☀️';
+
+  /**
+   * Read the saved theme from Local Storage without ever throwing.
+   *
+   * @returns {('dark'|'light'|null)} the stored theme, or null when nothing is
+   *   saved, the value is unrecognized, or storage is unavailable.
+   */
+  static getStoredTheme() {
+    try {
+      const stored = localStorage.getItem(ThemeManager.STORAGE_KEY);
+      return stored === 'dark' || stored === 'light' ? stored : null;
+    } catch (error) {
+      // Access can throw when storage is disabled (e.g. Safari private mode).
+      console.error('Could not read saved theme:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Resolve the theme to apply: the saved preference when present, otherwise
+   * the OS preference via prefers-color-scheme, defaulting to light.
+   *
+   * @returns {('dark'|'light')}
+   */
+  static getPreferredTheme() {
+    const stored = ThemeManager.getStoredTheme();
+    if (stored) {
+      return stored;
+    }
+
+    // matchMedia may be absent in very old environments; guard defensively.
+    if (
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-color-scheme: dark)').matches
+    ) {
+      return 'dark';
+    }
+
+    return 'light';
+  }
+
+  /**
+   * Persist the chosen theme. Never throws; returns false on failure (e.g.
+   * storage disabled or quota exceeded) so the UI can still toggle in-session.
+   *
+   * @param {('dark'|'light')} theme
+   * @returns {boolean} true when saved, false otherwise.
+   */
+  static saveTheme(theme) {
+    try {
+      localStorage.setItem(ThemeManager.STORAGE_KEY, theme);
+      return true;
+    } catch (error) {
+      console.error('Could not save theme preference:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Apply a theme to the document and sync the toggle button's state.
+   *
+   * Sets (or removes) data-theme="dark" on <html> so getComputedStyle on the
+   * root resolves the active custom-property values. Updates the toggle's
+   * aria-pressed and icon to reflect the current theme.
+   *
+   * @param {('dark'|'light')} theme
+   * @returns {void}
+   */
+  static applyTheme(theme) {
+    const isDark = theme === 'dark';
+
+    if (isDark) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    } else {
+      document.documentElement.removeAttribute('data-theme');
+    }
+
+    const toggle = document.getElementById('theme-toggle');
+    if (toggle) {
+      // aria-pressed reflects "dark mode is on".
+      toggle.setAttribute('aria-pressed', isDark ? 'true' : 'false');
+
+      const icon = toggle.querySelector('.theme-toggle-icon');
+      if (icon) {
+        icon.textContent = isDark ? ThemeManager.ICON_DARK : ThemeManager.ICON_LIGHT;
+      }
+    }
+  }
+
+  /**
+   * Determine the currently applied theme from the document.
+   *
+   * @returns {('dark'|'light')}
+   */
+  static getCurrentTheme() {
+    return document.documentElement.getAttribute('data-theme') === 'dark'
+      ? 'dark'
+      : 'light';
+  }
+
+  /**
+   * Flip to the opposite theme, apply it, persist it, and refresh the chart so
+   * its label/tooltip colors track the new theme.
+   *
+   * @returns {void}
+   */
+  static toggle() {
+    const next = ThemeManager.getCurrentTheme() === 'dark' ? 'light' : 'dark';
+    ThemeManager.applyTheme(next);
+    ThemeManager.saveTheme(next);
+    ThemeManager.refreshChart();
+  }
+
+  /**
+   * Ask the running chart (if any) to recompute its theme-dependent colors.
+   * Resolved through the module-scoped uiManager so ThemeManager stays
+   * decoupled from the component wiring.
+   *
+   * @returns {void}
+   */
+  static refreshChart() {
+    if (uiManager && uiManager.chartComponent) {
+      uiManager.chartComponent.refreshTheme();
+    }
+  }
+
+  /**
+   * Initialize theming: apply the preferred theme and bind the toggle click.
+   * Called from initApp() after the UI (and chart) have been built so the
+   * initial apply can refresh an already-created chart.
+   *
+   * @returns {void}
+   */
+  static init() {
+    ThemeManager.applyTheme(ThemeManager.getPreferredTheme());
+    ThemeManager.refreshChart();
+
+    const toggle = document.getElementById('theme-toggle');
+    if (toggle) {
+      toggle.addEventListener('click', () => ThemeManager.toggle());
+    }
+  }
+}
+
+/**
  * TransactionManager
  *
  * Manages the in-memory transaction collection and the business logic that
@@ -1197,6 +1365,24 @@ class ChartComponent {
   }
 
   /**
+   * Read theme-dependent chart colors from the active CSS custom properties.
+   *
+   * Using getComputedStyle on <html> keeps the CSS tokens the single source of
+   * truth, so the chart tracks whatever the [data-theme] overrides resolve to.
+   * The segment border uses the (alt) background color so slices separate from
+   * one another and from the chart section in both themes.
+   *
+   * @returns {{text: string, border: string}} resolved color strings.
+   */
+  getThemeColors() {
+    const styles = getComputedStyle(document.documentElement);
+    const text = styles.getPropertyValue('--color-text').trim() || '#1a1a1a';
+    const border =
+      styles.getPropertyValue('--color-background-alt').trim() || '#ffffff';
+    return { text, border };
+  }
+
+  /**
    * Builds the Chart.js configuration object for the spending pie chart.
    * Private helper used by initialize() (Req 6.3, 6.7, 6.8).
    *
@@ -1212,6 +1398,10 @@ class ChartComponent {
       (entry) => this.categoryColors[entry.category] || '#CCCCCC'
     );
 
+    // Read the active theme's colors at build time so a chart created while in
+    // dark mode is correct immediately (Req: theme-aware at build time).
+    const themeColors = this.getThemeColors();
+
     return {
       type: 'pie',
       data: {
@@ -1220,8 +1410,9 @@ class ChartComponent {
           {
             data,
             backgroundColor,
-            // White borders keep adjacent slices visually separated.
-            borderColor: '#FFFFFF',
+            // Borders use the theme surface color so adjacent slices stay
+            // visually separated in both light and dark themes.
+            borderColor: themeColors.border,
             borderWidth: 2,
           },
         ],
@@ -1232,8 +1423,14 @@ class ChartComponent {
         plugins: {
           legend: {
             position: 'bottom',
+            labels: {
+              // Legend text follows the theme so it stays readable on dark.
+              color: themeColors.text,
+            },
           },
           tooltip: {
+            titleColor: themeColors.text,
+            bodyColor: themeColors.text,
             callbacks: {
               // Show "<Category>: $12.34 (56.7%)" so the dollar amount and the
               // share of total spending are both visible on hover. We compute
@@ -1306,6 +1503,35 @@ class ChartComponent {
     this.chartInstance.data.datasets[0].backgroundColor = categoryTotals.map(
       (entry) => this.categoryColors[entry.category] || '#CCCCCC'
     );
+    this.chartInstance.update('none');
+  }
+
+  /**
+   * Re-apply theme-dependent colors (legend/tooltip text and segment borders)
+   * to the live chart and redraw. Safe to call when no chart exists yet; the
+   * next createChartConfig() will pick up the active theme on its own.
+   *
+   * @returns {void}
+   */
+  refreshTheme() {
+    if (!this.chartInstance) {
+      return;
+    }
+
+    const themeColors = this.getThemeColors();
+
+    // Legend label color.
+    this.chartInstance.options.plugins.legend.labels =
+      this.chartInstance.options.plugins.legend.labels || {};
+    this.chartInstance.options.plugins.legend.labels.color = themeColors.text;
+
+    // Tooltip title/body text color.
+    this.chartInstance.options.plugins.tooltip.titleColor = themeColors.text;
+    this.chartInstance.options.plugins.tooltip.bodyColor = themeColors.text;
+
+    // Segment border color (slice separators).
+    this.chartInstance.data.datasets[0].borderColor = themeColors.border;
+
     this.chartInstance.update('none');
   }
 
@@ -1643,6 +1869,12 @@ function initApp() {
           control.disabled = true;
         });
       }
+
+      // Theming does not depend on storage: still apply the OS preference and
+      // allow in-session toggling (ThemeManager.saveTheme() is guarded and
+      // simply no-ops when storage is blocked). The toggle lives in the header,
+      // outside the locked form, so it stays usable.
+      ThemeManager.init();
       return;
     }
 
@@ -1654,6 +1886,11 @@ function initApp() {
     // Build the UI layer on top of the data layer and bind all event handlers.
     uiManager = new UIManager(transactionManager);
     uiManager.initialize();
+
+    // Initialize theming after the UI (and chart) exist so the initial theme
+    // apply can refresh an already-built chart, keeping a dark first-load chart
+    // readable immediately.
+    ThemeManager.init();
   } catch (error) {
     // Any unexpected failure during boot leaves the app unusable; log the
     // details for debugging and show a friendly message to the user.

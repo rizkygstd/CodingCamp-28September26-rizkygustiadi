@@ -10,7 +10,16 @@ A client-side Expense & Budget Visualizer. Track expenses by category (Food, Tra
 - **Pie chart** — spending distribution across categories, with a legend and per-segment percentages.
 - **Local Storage persistence** — your data is saved automatically and restored when you reopen the app.
 - **Multi-tab sync** — changes made in one browser tab are reflected in other open tabs.
+- **Dark / light theme** — a toggle in the header switches the color theme; see [Theme / Dark mode](#theme--dark-mode).
 - **Responsive, accessible UI** — works across screen sizes and is built to accessibility guidelines.
+
+## Theme / Dark mode
+
+A theme toggle button sits in the top-right of the header. Clicking it switches between light and dark color schemes, and the sun/moon icon plus `aria-pressed` state update to reflect the current theme.
+
+- **OS-preference default** — on first load, when you have not chosen a theme yet, the app follows your operating system's `prefers-color-scheme` setting.
+- **Persistence** — your choice is saved to Local Storage under the key `expense-tracker-theme` (value `"light"` or `"dark"`) and restored on your next visit. If storage is unavailable, the toggle still works for the current session but the choice is not remembered.
+- **Chart adapts** — the pie chart's legend, tooltip text, and segment borders recolor to stay readable in both themes.
 
 ## Setup / Run
 
@@ -47,6 +56,13 @@ expense-budget-visualizer/
 ```
 
 ## Local Storage Schema
+
+The app uses two Local Storage keys:
+
+- `expense-tracker-transactions` — the transaction data (schema below).
+- `expense-tracker-theme` — the saved theme preference, either `"light"` or `"dark"` (see [Theme / Dark mode](#theme--dark-mode)).
+
+### Transactions
 
 - **Key:** `expense-tracker-transactions`
 - **Value:** a JSON string of the form:

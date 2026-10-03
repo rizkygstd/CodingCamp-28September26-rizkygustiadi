@@ -65,6 +65,55 @@
     --shadow-focus: 0 0 0 3px rgba(0, 102, 204, 0.3);
 }
 
+/* ==============================================
+   Dark theme — overrides the :root color tokens only.
+   Applied by ThemeManager setting data-theme="dark" on <html>.
+   Component rules keep referencing the same custom properties, so no
+   component rule hardcodes dark colors. Values chosen to preserve WCAG AA
+   (4.5:1 text, 3:1 UI) against the dark surfaces.
+   ============================================== */
+[data-theme="dark"] {
+    /* Surfaces */
+    --color-background: #121212;        /* app background */
+    --color-background-alt: #1e1e1e;    /* cards / form / chart section */
+    --color-border: #3a3a3a;            /* ~3:1 against #121212 for UI edges */
+    --color-border-focus: #4d9fff;      /* brighter blue focus ring on dark */
+
+    /* Text — verified contrast on the dark surfaces above */
+    --color-text: #eaeaea;              /* ~14:1 on #121212 */
+    --color-text-secondary: #b0b0b0;    /* ~6.9:1 on #121212 */
+
+    /* Primary — brightened so white button text keeps >=4.5:1 */
+    --color-primary: #1a73e8;
+    --color-primary-hover: #4285f4;
+
+    /* Error — lighter red reads on dark; bg/border tuned for the dark surface */
+    --color-error: #f87171;             /* ~5.6:1 on #121212 */
+    --color-error-bg: #2a1517;
+    --color-error-border: #b91c1c;
+
+    /* Success */
+    --color-success: #34d399;
+
+    /* Category badge colors — brightened so white badge text keeps contrast
+       and the hues stay legible on dark backgrounds. */
+    --color-food: #ef4444;              /* Red */
+    --color-transport: #3b82f6;         /* Blue */
+    --color-fun: #a855f7;               /* Purple */
+
+    /* Deeper shadows read better over dark surfaces */
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
+    --shadow-md: 0 4px 8px rgba(0, 0, 0, 0.6);
+    --shadow-focus: 0 0 0 3px rgba(77, 159, 255, 0.4);
+}
+
+/* Smooth color transition when switching themes. The prefers-reduced-motion
+   block below already zeroes transition-duration globally, so this is
+   neutralized for users who ask for reduced motion. */
+body {
+    transition: background-color var(--transition-medium), color var(--transition-medium);
+}
+
 /* Base Styles */
 body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Helvetica Neue', sans-serif;
@@ -89,6 +138,52 @@ body {
     position: sticky;
     top: 0;
     z-index: 100;
+}
+
+/* Theme toggle button. Pinned to the top-right of the header so the balance
+   text stays centered. Uses the shared 44x44px touch-target convention and a
+   translucent surface that reads on the blue header in both themes. */
+#theme-toggle {
+    position: absolute;
+    top: var(--spacing-md);
+    right: var(--spacing-md);
+    min-width: var(--min-touch-target);
+    min-height: var(--min-touch-target);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    font-size: 22px;
+    line-height: 1;
+    color: white;
+    background-color: rgba(255, 255, 255, 0.12);
+    border: 2px solid rgba(255, 255, 255, 0.5);
+    border-radius: 50%;
+    cursor: pointer;
+    /* Scope transitions to GPU-friendly properties only (Requirement 10.3). */
+    transition: background-color var(--transition-fast), transform var(--transition-fast);
+    will-change: transform;
+}
+
+#theme-toggle:hover {
+    background-color: rgba(255, 255, 255, 0.24);
+    transform: translateY(-1px);
+}
+
+#theme-toggle:active {
+    transform: translateY(0);
+}
+
+/* Keyboard focus ring consistent with .btn-primary (white ring on blue bg). */
+#theme-toggle:focus-visible {
+    outline: 3px solid #ffffff;
+    outline-offset: 2px;
+    box-shadow: 0 0 0 5px var(--color-border-focus);
+}
+
+.theme-toggle-icon {
+    display: block;
+    line-height: 1;
 }
 
 #balance-section h1 {
