@@ -1,0 +1,1693 @@
+// Expense & Budget Visualizer Application
+// Application logic will be implemented in subsequent tasks
+
+'use strict';
+
+/**
+ * StorageManager
+ *
+ * Provides an abstraction layer over the browser Local Storage API for
+ * persisting transaction data. Implemented as a static class since storage
+ * access is stateless and shared across the application.
+ *
+ * Methods (isStorageAvailable, loadTransactions, saveTransactions,
+ * validateStoredData, clearStorage) are added in subsequent tasks.
+ */
+class StorageManager {
+  // Local Storage key under which transaction data is persisted.
+  static STORAGE_KEY = 'expense-tracker-transactions';
+
+  // Schema version used to support future data migrations.
+  static SCHEMA_VERSION = '1.0';
+
+  /**
+   * Check whether Local Storage is available and usable in the current browser.
+   *
+   * Some browsers expose `localStorage` but throw on write (e.g. Safari private
+   * mode, or when storage is disabled). The only reliable test is to actually
+   * perform a write/read/remove round-trip inside a try/catch.
+   *
+   * @returns {boolean} true if storage can be read and written, false otherwise
+   */
+  static isStorageAvailable() {
+    try {
+      const testKey = '__storage_test__';
+      // Round-trip a value to confirm reads and writes both succeed.
+      localStorage.setItem(testKey, testKey);
+      const readBack = localStorage.getItem(testKey);
+      localStorage.removeItem(testKey);
+      return readBack === testKey;
+    } catch (error) {
+      // Access can throw (SecurityError, QuotaExceededError, etc.).
+      console.error('Local Storage is not available:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Validate the structural shape of data parsed from storage.
+   *
+   * This is a shallow structure check only; individual transactions are
+   * validated separately in loadTransactions().
+   *
+   * @param {*} data - Parsed JSON object retrieved from storage
+   * @returns {boolean} true if data has a version field and a transactions array
+   */
+  static validateStoredData(data) {
+    return (
+      data !== null &&
+      typeof data === 'object' &&
+      typeof data.version !== 'undefined' &&
+      Array.isArray(data.transactions)
+    );
+  }
+
+  /**
+   * Validate a single transaction object against the expected schema.
+   *
+   * Expected shape: { id, itemName, amount, category, timestamp }
+   * where amount is a non-negative integer (cents) and timestamp is a number.
+   *
+   * @param {*} transaction - Candidate transaction object
+   * @returns {boolean} true if the transaction has all required valid fields
+   */
+  static isValidTransaction(transaction) {
+    return (
+      transaction !== null &&
+      typeof transaction === 'object' &&
+      typeof transaction.id === 'string' &&
+      transaction.id.length > 0 &&
+      typeof transaction.itemName === 'string' &&
+      typeof transaction.amount === 'number' &&
+      Number.isInteger(transaction.amount) &&
+      transaction.amount >= 0 &&
+      typeof transaction.category === 'string' &&
+      transaction.category.length > 0 &&
+      typeof transaction.timestamp === 'number'
+    );
+  }
+
+  /**
+   * Load all transactions from Local Storage.
+   *
+   * Reads and parses the stored payload, validates its schema, then validates
+   * each transaction individually. Corrupted transactions are filtered out and
+   * logged rather than discarding the entire dataset. Never throws.
+   *
+   * @returns {Array} Array of valid transactions, or an empty array when data
+   *                  is missing, unparseable, or structurally invalid.
+   */
+  static loadTransactions() {
+    try {
+      const rawData = localStorage.getItem(StorageManager.STORAGE_KEY);
+
+      // No data persisted yet is a normal first-run state, not an error.
+      if (rawData === null) {
+        return [];
+      }
+
+      const parsed = JSON.parse(rawData);
+
+      // Reject payloads that do not match the expected schema structure.
+      if (!StorageManager.validateStoredData(parsed)) {
+        console.error(
+          'Stored data has an invalid schema structure; returning empty transactions.'
+        );
+        return [];
+      }
+
+      // Keep only well-formed transactions; log any that are dropped.
+      const validTransactions = [];
+      for (const transaction of parsed.transactions) {
+        if (StorageManager.isValidTransaction(transaction)) {
+          validTransactions.push(transaction);
+        } else {
+          console.warn('Skipping corrupted transaction:', transaction);
+        }
+      }
+
+      return validTransactions;
+    } catch (error) {
+      // Covers JSON parse errors and any storage access failures.
+      console.error('Failed to load transactions from Local Storage:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Save a transactions array to Local Storage.
+   *
+   * Wraps the array in the versioned storage schema, serializes it, and writes
+   * it under STORAGE_KEY. Never throws; returns false on failure such as a
+   * quota exceeded error or storage being disabled.
+   *
+   * @param {Array} transactions - Transaction objects to persist
+   * @returns {boolean} true on success, false on failure
+   */
+  static saveTransactions(transactions) {
+    try {
+      const payload = {
+        version: StorageManager.SCHEMA_VERSION,
+        transactions: transactions
+      };
+
+      const serialized = JSON.stringify(payload);
+      localStorage.setItem(StorageManager.STORAGE_KEY, serialized);
+      return true;
+    } catch (error) {
+      // Typically QuotaExceededError or SecurityError when storage is disabled.
+      console.error('Failed to save transactions to Local Storage:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Remove all stored transaction data from Local Storage.
+   *
+   * Intended for testing and reset flows. Never throws.
+   *
+   * @returns {boolean} true on success, false on failure
+   */
+  static clearStorage() {
+    try {
+      localStorage.removeItem(StorageManager.STORAGE_KEY);
+      return true;
+    } catch (error) {
+      console.error('Failed to clear Local Storage:', error);
+      return false;
+    }
+  }
+}
+
+/**
+ * TransactionManager
+ *
+ * Manages the in-memory transaction collection and the business logic that
+ * surrounds it: loading persisted data, validating user input, and generating
+ * unique identifiers. Persistence is delegated to an injected StorageManager
+ * so this class stays focused on transaction logic.
+ *
+ * Transaction shape: { id, itemName, amount, category, timestamp }
+ * where `amount` is stored as an integer number of cents.
+ */
+class TransactionManager {
+  // Allowed category values. Amounts are validated against these exactly.
+  static CATEGORIES = ['Food', 'Transport', 'Fun'];
+
+  // Amount bounds expressed in dollars (inclusive). 0.01 min, 999,999.99 max.
+  static MIN_AMOUNT_DOLLARS = 0.01;
+  static MAX_AMOUNT_DOLLARS = 999999.99;
+
+  // Maximum allowed length for a transaction's item name.
+  static MAX_ITEM_NAME_LENGTH = 100;
+
+  /**
+   * @param {typeof StorageManager} storageManager - Storage dependency used
+   *        for loading and persisting transactions.
+   */
+  constructor(storageManager) {
+    // Keep a reference to the injected persistence layer.
+    this.storageManager = storageManager;
+
+    // In-memory transaction list; populated by initialize().
+    this.transactions = [];
+
+    // Tracks whether initialize() has run so callers can guard against use
+    // before data has been loaded from storage.
+    this.isInitialized = false;
+  }
+
+  /**
+   * Load transactions from storage into memory and prepare the manager for use.
+   *
+   * Loaded transactions are sorted newest-first so downstream consumers (list
+   * rendering, etc.) receive data in the expected display order. Should be
+   * called once during application startup.
+   *
+   * @returns {void}
+   */
+  initialize() {
+    // Pull persisted transactions; StorageManager returns [] on any failure.
+    const loaded = this.storageManager.loadTransactions();
+    this.transactions = Array.isArray(loaded) ? loaded : [];
+
+    // Sort newest-first by timestamp for reverse-chronological display.
+    this.transactions.sort((a, b) => b.timestamp - a.timestamp);
+
+    this.isInitialized = true;
+  }
+
+  /**
+   * Validate raw transaction input without creating a transaction.
+   *
+   * Each field is checked independently so the caller can surface all errors
+   * at once. Error messages are user-facing and describe how to fix the issue.
+   *
+   * @param {string} itemName - Raw item name (may contain surrounding whitespace)
+   * @param {number} amount - Amount in dollars
+   * @param {string} category - Category value
+   * @returns {{valid: boolean, errors: {itemName?: string, amount?: string, category?: string}}}
+   */
+  static validateTransaction(itemName, amount, category) {
+    const errors = {};
+
+    // --- Item name: required, non-empty after trimming, max length ---
+    const trimmedName =
+      typeof itemName === 'string' ? itemName.trim() : '';
+    if (trimmedName.length === 0) {
+      errors.itemName = 'Item name is required.';
+    } else if (trimmedName.length > TransactionManager.MAX_ITEM_NAME_LENGTH) {
+      errors.itemName = `Item name must be ${TransactionManager.MAX_ITEM_NAME_LENGTH} characters or fewer.`;
+    }
+
+    // --- Amount: numeric, within range, at most 2 decimal places ---
+    const numericAmount =
+      typeof amount === 'number' ? amount : Number(amount);
+    if (
+      amount === '' ||
+      amount === null ||
+      amount === undefined ||
+      Number.isNaN(numericAmount)
+    ) {
+      errors.amount = 'Amount is required and must be a number.';
+    } else if (numericAmount < 0) {
+      // Explicitly reject negatives with a dedicated message (Req 1.10).
+      errors.amount = 'Amount cannot be negative.';
+    } else if (numericAmount < TransactionManager.MIN_AMOUNT_DOLLARS) {
+      errors.amount = 'Amount must be at least $0.01.';
+    } else if (numericAmount > TransactionManager.MAX_AMOUNT_DOLLARS) {
+      errors.amount = 'Amount must not exceed $999,999.99.';
+    } else if (!TransactionManager.hasAtMostTwoDecimals(numericAmount)) {
+      errors.amount = 'Amount can have at most 2 decimal places.';
+    }
+
+    // --- Category: must be one of the allowed values ---
+    if (!TransactionManager.CATEGORIES.includes(category)) {
+      errors.category = 'Please select a valid category: Food, Transport, or Fun.';
+    }
+
+    return {
+      valid: Object.keys(errors).length === 0,
+      errors
+    };
+  }
+
+  /**
+   * Determine whether a numeric amount has at most two decimal places.
+   *
+   * Multiplying by 100 and comparing against the rounded value detects a
+   * fractional cent (more than 2 decimals) while tolerating floating-point
+   * representation error via a small epsilon.
+   *
+   * @param {number} amountDollars - Amount in dollars
+   * @returns {boolean} true if the value has 2 or fewer decimal places
+   */
+  static hasAtMostTwoDecimals(amountDollars) {
+    const cents = amountDollars * 100;
+    return Math.abs(cents - Math.round(cents)) < 1e-9;
+  }
+
+  /**
+   * Generate a unique transaction identifier.
+   *
+   * Combines the current timestamp with a random base-36 suffix, which is
+   * sufficiently unique for a single-client application without an external
+   * UUID dependency.
+   *
+   * @returns {string} Unique ID string
+   */
+  static generateId() {
+    // Use String.prototype.slice() instead of the legacy/deprecated substr().
+    // slice(2, 11) yields the same 9-character suffix (indices 2–10) as
+    // substr(2, 9) and is the modern, universally-supported equivalent across
+    // Chrome, Firefox, Edge, and Safari (Req 8.5).
+    return `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+  }
+
+  /**
+   * Add a new transaction after validating the supplied input.
+   *
+   * The amount arrives in dollars and is converted to an integer number of
+   * cents for exact financial arithmetic. New transactions are inserted at the
+   * front of the array so the collection stays newest-first.
+   *
+   * @param {string} itemName - Item description (will be trimmed)
+   * @param {number} amountDollars - Amount in dollars
+   * @param {string} category - Category value (Food, Transport, or Fun)
+   * @returns {object|null} The created transaction, or null if validation fails
+   */
+  addTransaction(itemName, amountDollars, category) {
+    // Reject invalid input up front; caller is responsible for showing errors.
+    const validation = TransactionManager.validateTransaction(
+      itemName,
+      amountDollars,
+      category
+    );
+    if (!validation.valid) {
+      return null;
+    }
+
+    // Convert dollars to integer cents. Math.round avoids floating-point drift
+    // (e.g. 25.5 * 100 === 2550 reliably).
+    const amountCents = Math.round(amountDollars * 100);
+
+    const transaction = {
+      id: TransactionManager.generateId(),
+      itemName: itemName.trim(),
+      amount: amountCents,
+      category: category,
+      timestamp: Date.now()
+    };
+
+    // Insert at the beginning so the list remains newest-first.
+    this.transactions.unshift(transaction);
+
+    // Persist the updated collection.
+    this.storageManager.saveTransactions(this.transactions);
+
+    return transaction;
+  }
+
+  /**
+   * Delete a transaction by its unique ID.
+   *
+   * On a persistence failure the removed transaction is restored to its
+   * original position so in-memory state stays consistent with storage.
+   *
+   * @param {string} id - ID of the transaction to delete
+   * @returns {boolean} true if deleted and persisted, false if not found or
+   *                    the save failed
+   */
+  deleteTransaction(id) {
+    const index = this.transactions.findIndex((t) => t.id === id);
+
+    // Nothing to delete if the ID is unknown.
+    if (index === -1) {
+      return false;
+    }
+
+    // Remove the transaction, retaining it so we can restore on save failure.
+    const [removed] = this.transactions.splice(index, 1);
+
+    const saved = this.storageManager.saveTransactions(this.transactions);
+    if (!saved) {
+      // Roll back the in-memory change to match the un-persisted state.
+      this.transactions.splice(index, 0, removed);
+      return false;
+    }
+
+    return true;
+  }
+
+  /**
+   * Get all transactions as a defensive copy, sorted newest-first.
+   *
+   * Returning a copy prevents callers from mutating the manager's internal
+   * array. The copy is sorted by timestamp descending so consumers always get
+   * reverse-chronological order regardless of insertion history.
+   *
+   * @returns {Array} Sorted shallow copy of the transactions array
+   */
+  getTransactions() {
+    return [...this.transactions].sort((a, b) => b.timestamp - a.timestamp);
+  }
+
+  /**
+   * Find a single transaction by ID.
+   *
+   * @param {string} id - ID of the transaction to find
+   * @returns {object|null} The matching transaction, or null if not found
+   */
+  getTransactionById(id) {
+    const transaction = this.transactions.find((t) => t.id === id);
+    return transaction || null;
+  }
+
+  /**
+   * Calculate the total spending across all transactions, in cents.
+   *
+   * Transactions with invalid amounts (non-integer or negative) are excluded
+   * defensively so a single corrupted record cannot poison the total. The
+   * final value is rounded to guard against any accumulated imprecision.
+   *
+   * @returns {number} Total amount in cents
+   */
+  getTotalCents() {
+    const total = this.transactions.reduce((sum, transaction) => {
+      const amount = transaction.amount;
+
+      // Skip amounts that are not valid non-negative integer cents.
+      if (!Number.isInteger(amount) || amount < 0) {
+        return sum;
+      }
+
+      return sum + amount;
+    }, 0);
+
+    return Math.round(total);
+  }
+
+  /**
+   * Aggregate spending totals grouped by category.
+   *
+   * Always returns an entry for every known category (even when zero) so the
+   * chart and other consumers have a stable, complete shape to work with.
+   *
+   * @returns {Array<{category: string, totalCents: number}>} Per-category totals
+   */
+  getCategoryTotals() {
+    // Seed each category at zero so absent categories still appear.
+    const totalsByCategory = {};
+    for (const category of TransactionManager.CATEGORIES) {
+      totalsByCategory[category] = 0;
+    }
+
+    // Accumulate each transaction's amount into its category bucket.
+    for (const transaction of this.transactions) {
+      if (
+        Object.prototype.hasOwnProperty.call(
+          totalsByCategory,
+          transaction.category
+        ) &&
+        Number.isInteger(transaction.amount) &&
+        transaction.amount >= 0
+      ) {
+        totalsByCategory[transaction.category] += transaction.amount;
+      }
+    }
+
+    return TransactionManager.CATEGORIES.map((category) => ({
+      category,
+      totalCents: totalsByCategory[category]
+    }));
+  }
+
+  /**
+   * Get the number of transactions currently held in memory.
+   *
+   * @returns {number} Count of transactions
+   */
+  getTransactionCount() {
+    return this.transactions.length;
+  }
+}
+
+/**
+ * UI Utility Functions
+ *
+ * Module-level helpers shared across UI components. These are standalone
+ * functions (not class methods) so any component can call them directly.
+ */
+
+// Maximum displayable amount in cents ($999,999,999.99). Totals above this are
+// shown with a trailing "+" to indicate an overflow of the display budget.
+const MAX_DISPLAY_CENTS = 99999999999;
+
+/**
+ * Create a debounced version of a function (Req 7.4).
+ *
+ * The returned wrapper delays invoking `fn` until `delay` milliseconds have
+ * passed since the last call, so a burst of rapid calls collapses into a single
+ * invocation with the most recent arguments. Used to batch expensive chart
+ * redraws when refreshes happen in quick succession.
+ *
+ * @param {Function} fn - The function to debounce.
+ * @param {number} delay - Quiet period in milliseconds before `fn` runs.
+ * @returns {Function} Debounced wrapper that preserves the latest arguments.
+ */
+function debounce(fn, delay) {
+  let timeoutId = null;
+  return function debounced(...args) {
+    // Reset the timer on every call so only the final call in a burst fires.
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+    }
+    timeoutId = setTimeout(() => {
+      timeoutId = null;
+      fn.apply(this, args);
+    }, delay);
+  };
+}
+
+/**
+ * Format an integer number of cents as a US-style currency string.
+ *
+ * Values are stored as integer cents for exact arithmetic, so the only
+ * rounding needed here guards against a non-integer being passed in. Rounding
+ * uses half-up (Math.round) to match the balance calculation (Req 5.7).
+ *
+ * @param {number} cents - Amount in cents (expected to be an integer)
+ * @returns {string} Formatted currency string, e.g. "$1,234.56". Amounts above
+ *                   $999,999,999.99 return "$999,999,999.99+" (Req 5.8).
+ */
+function formatCurrency(cents) {
+  // Coerce to a number and default invalid input to zero so the display never
+  // shows "NaN" to the user.
+  let safeCents = Number(cents);
+  if (!Number.isFinite(safeCents)) {
+    safeCents = 0;
+  }
+
+  // Half-up round to whole cents in case a fractional cent slipped through.
+  safeCents = Math.round(safeCents);
+
+  // Overflow: cap the display and append "+" to signal the real value is higher.
+  if (safeCents > MAX_DISPLAY_CENTS) {
+    return '$999,999,999.99+';
+  }
+
+  // Convert cents to dollars for formatting.
+  const dollars = safeCents / 100;
+
+  // Intl.NumberFormat applies the comma thousands separator, period decimal
+  // separator, and exactly 2 decimal places in one step.
+  const formatter = new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  });
+
+  return formatter.format(dollars);
+}
+
+/**
+ * Display the global error banner with a message.
+ *
+ * The banner (id "global-error") carries the `is-hidden` utility class by
+ * default, so showing it means removing that class. Visibility is driven by a
+ * CSS class rather than an inline style to keep presentation in the stylesheet
+ * (Req 9.6). An optional duration auto-dismisses the banner after the delay.
+ *
+ * @param {string} message - User-facing error message to display
+ * @param {number} [duration] - Optional auto-dismiss delay in milliseconds
+ * @returns {void}
+ */
+function showGlobalError(message, duration) {
+  const banner = document.getElementById('global-error');
+  const messageElement = document.getElementById('error-message');
+
+  // Guard against missing DOM so a UI error never cascades into a crash.
+  if (!banner || !messageElement) {
+    console.error('Global error elements not found; message was:', message);
+    return;
+  }
+
+  messageElement.textContent = message;
+
+  // Reveal the banner by dropping the hidden utility class.
+  banner.classList.remove('is-hidden');
+
+  // Auto-dismiss after the caller-provided timeout, when supplied.
+  if (typeof duration === 'number' && duration > 0) {
+    setTimeout(dismissGlobalError, duration);
+  }
+}
+
+/**
+ * Hide the global error banner and clear its message text.
+ *
+ * @returns {void}
+ */
+function dismissGlobalError() {
+  const banner = document.getElementById('global-error');
+  const messageElement = document.getElementById('error-message');
+
+  if (banner) {
+    // Re-hide via the CSS utility class rather than an inline style (Req 9.6).
+    banner.classList.add('is-hidden');
+  }
+
+  if (messageElement) {
+    messageElement.textContent = '';
+  }
+}
+
+/**
+ * InputFormComponent
+ *
+ * Encapsulates the transaction input form: reading values, surfacing and
+ * clearing validation errors, resetting state, and wiring the submit event.
+ * The component owns only DOM concerns; business validation lives in
+ * TransactionManager. It caches element references in the constructor so
+ * repeated interactions avoid redundant DOM lookups.
+ */
+class InputFormComponent {
+  // CSS class applied to inputs that currently fail validation (Req 10.8).
+  static ERROR_CLASS = 'input-error';
+
+  /**
+   * @param {string} formElementId - The id of the <form> element to manage
+   *        (e.g. "transaction-form").
+   */
+  constructor(formElementId) {
+    // Reference to the form element itself; used for submit binding and reset.
+    this.form = document.getElementById(formElementId);
+
+    // Cache the three input/select fields the form exposes.
+    this.itemNameInput = document.getElementById('item-name');
+    this.amountInput = document.getElementById('amount');
+    this.categorySelect = document.getElementById('category');
+
+    // Cache the matching error-message spans keyed by field name so
+    // showValidationErrors()/clearValidationErrors() can iterate uniformly.
+    this.errorElements = {
+      itemName: document.getElementById('item-name-error'),
+      amount: document.getElementById('amount-error'),
+      category: document.getElementById('category-error')
+    };
+
+    // Map field names to their input elements for the same uniform iteration.
+    this.inputElements = {
+      itemName: this.itemNameInput,
+      amount: this.amountInput,
+      category: this.categorySelect
+    };
+
+    // Cache the submit button so setDisabled() can toggle it quickly.
+    this.submitButton = this.form
+      ? this.form.querySelector('button[type="submit"]')
+      : null;
+  }
+
+  /**
+   * Read and normalize the current form field values.
+   *
+   * Item name is trimmed of surrounding whitespace and the amount is parsed as
+   * a float (NaN when the field is blank or non-numeric, which downstream
+   * validation will reject).
+   *
+   * @returns {{itemName: string, amount: number, category: string}}
+   */
+  getFormValues() {
+    const itemName = this.itemNameInput ? this.itemNameInput.value.trim() : '';
+    // parseFloat yields NaN for empty/invalid input; validation handles that.
+    const amount = this.amountInput ? parseFloat(this.amountInput.value) : NaN;
+    const category = this.categorySelect ? this.categorySelect.value : '';
+
+    return { itemName, amount, category };
+  }
+
+  /**
+   * Display per-field validation errors on the form.
+   *
+   * For each field present in the errors object, writes the message into its
+   * error span, marks the input invalid for assistive technology, and applies
+   * the visual error class. Fields absent from the object are left untouched.
+   *
+   * @param {{itemName?: string, amount?: string, category?: string}} errors
+   *        Map of field names to user-facing error messages.
+   * @returns {void}
+   */
+  showValidationErrors(errors) {
+    if (!errors) {
+      return;
+    }
+
+    for (const field of Object.keys(errors)) {
+      const message = errors[field];
+      const errorElement = this.errorElements[field];
+      const inputElement = this.inputElements[field];
+
+      // Surface the message text in the field's dedicated error span.
+      if (errorElement) {
+        errorElement.textContent = message;
+      }
+
+      // Flag the input as invalid and style it to match (Req 10.8).
+      if (inputElement) {
+        inputElement.setAttribute('aria-invalid', 'true');
+        inputElement.classList.add(InputFormComponent.ERROR_CLASS);
+      }
+    }
+  }
+
+  /**
+   * Clear all validation error state from the form.
+   *
+   * Empties every error span, removes the aria-invalid attribute, and strips
+   * the visual error class so the form returns to a clean baseline.
+   *
+   * @returns {void}
+   */
+  clearValidationErrors() {
+    for (const field of Object.keys(this.errorElements)) {
+      const errorElement = this.errorElements[field];
+      const inputElement = this.inputElements[field];
+
+      if (errorElement) {
+        errorElement.textContent = '';
+      }
+
+      if (inputElement) {
+        // Remove the attribute entirely rather than setting it to "false",
+        // which some assistive tech still treats as a validity signal.
+        inputElement.removeAttribute('aria-invalid');
+        inputElement.classList.remove(InputFormComponent.ERROR_CLASS);
+      }
+    }
+  }
+
+  /**
+   * Reset the form to its initial empty state.
+   *
+   * Uses the native form.reset() to clear field values, then clears any
+   * lingering validation error state.
+   *
+   * @returns {void}
+   */
+  clearForm() {
+    if (this.form) {
+      this.form.reset();
+    }
+    this.clearValidationErrors();
+  }
+
+  /**
+   * Move keyboard focus to the first (item name) input.
+   *
+   * Called after a successful submit so the user can immediately type the next
+   * entry without reaching for the mouse (Req 1.9).
+   *
+   * @returns {void}
+   */
+  focusFirstInput() {
+    if (this.itemNameInput) {
+      this.itemNameInput.focus();
+    }
+  }
+
+  /**
+   * Enable or disable the entire form.
+   *
+   * Toggles the disabled attribute on the submit button and every input so the
+   * form can be locked during in-flight operations (Req 7.5).
+   *
+   * @param {boolean} disabled - true to disable, false to enable
+   * @returns {void}
+   */
+  setDisabled(disabled) {
+    if (this.submitButton) {
+      this.submitButton.disabled = disabled;
+    }
+
+    for (const field of Object.keys(this.inputElements)) {
+      const inputElement = this.inputElements[field];
+      if (inputElement) {
+        inputElement.disabled = disabled;
+      }
+    }
+  }
+
+  /**
+   * Register a submit handler for the form.
+   *
+   * Binds a single submit listener that prevents the default page reload,
+   * reads the current field values, and forwards them to the supplied handler
+   * as positional arguments (itemName, amount, category).
+   *
+   * @param {(itemName: string, amount: number, category: string) => void} handler
+   * @returns {void}
+   */
+  onSubmit(handler) {
+    if (!this.form || typeof handler !== 'function') {
+      return;
+    }
+
+    this.form.addEventListener('submit', (event) => {
+      // Stop the browser from reloading the page on submit.
+      event.preventDefault();
+
+      const { itemName, amount, category } = this.getFormValues();
+      handler(itemName, amount, category);
+    });
+  }
+}
+
+/**
+ * TransactionListComponent
+ *
+ * Renders the list of transactions and manages its empty state. This is the
+ * class skeleton only; rendering, add/remove, delete delegation, and empty
+ * state toggling are added in later tasks (9.2–9.8).
+ */
+class TransactionListComponent {
+  /**
+   * @param {string} containerElementId - The id of the list container element
+   *        (e.g. "transactions-container").
+   */
+  constructor(containerElementId) {
+    // Reference to the container that holds rendered transaction elements.
+    this.container = document.getElementById(containerElementId);
+
+    // Reference to the empty-state message shown when there are no transactions.
+    this.emptyState = document.getElementById('empty-state');
+  }
+
+  /**
+   * Build the DOM element for a single transaction.
+   *
+   * All user-provided values (item name, category, amount) are written via
+   * textContent rather than innerHTML to prevent XSS from malicious input.
+   * The data-id attribute on both the item and the delete button lets the
+   * delegated delete handler recover the transaction id from a click.
+   *
+   * @param {{id: string, itemName: string, amount: number, category: string}} transaction
+   * @returns {HTMLElement} The fully built .transaction-item element
+   */
+  createTransactionElement(transaction) {
+    // Root card element, tagged with the transaction id for lookups.
+    const item = document.createElement('div');
+    item.className = 'transaction-item';
+    item.dataset.id = transaction.id;
+
+    // --- Info column: item name + category badge ---
+    const info = document.createElement('div');
+    info.className = 'transaction-info';
+
+    const name = document.createElement('span');
+    name.className = 'transaction-name';
+    name.textContent = transaction.itemName;
+
+    const category = document.createElement('span');
+    // Category-specific class (e.g. category-Food) drives the color-coding.
+    category.className = `transaction-category category-${transaction.category}`;
+    category.textContent = transaction.category;
+
+    info.appendChild(name);
+    info.appendChild(category);
+
+    // --- Actions column: amount + delete button ---
+    const actions = document.createElement('div');
+    actions.className = 'transaction-actions';
+
+    const amount = document.createElement('span');
+    amount.className = 'transaction-amount';
+    // Amount is stored in cents; formatCurrency handles the display formatting.
+    amount.textContent = formatCurrency(transaction.amount);
+
+    const deleteButton = document.createElement('button');
+    deleteButton.type = 'button';
+    deleteButton.className = 'btn-delete';
+    deleteButton.dataset.id = transaction.id;
+    // Descriptive label names the item so screen-reader users know what the
+    // button deletes. Set via setAttribute to keep user text safely escaped.
+    deleteButton.setAttribute(
+      'aria-label',
+      `Delete ${transaction.itemName} transaction`
+    );
+
+    // The "×" glyph is decorative; hide it from assistive tech since the
+    // aria-label already conveys the button's purpose.
+    const deleteIcon = document.createElement('span');
+    deleteIcon.setAttribute('aria-hidden', 'true');
+    deleteIcon.textContent = '×';
+    deleteButton.appendChild(deleteIcon);
+
+    actions.appendChild(amount);
+    actions.appendChild(deleteButton);
+
+    item.appendChild(info);
+    item.appendChild(actions);
+
+    return item;
+  }
+
+  /**
+   * Render the full list of transactions, replacing any existing items.
+   *
+   * The empty-state element lives inside the container, so items are removed
+   * individually (rather than clearing innerHTML) to preserve the empty-state
+   * node and its reference. A DocumentFragment batches the inserts into a
+   * single reflow.
+   *
+   * @param {Array<object>} transactions - Transactions to display
+   * @returns {void}
+   */
+  render(transactions) {
+    if (!this.container) {
+      return;
+    }
+
+    // Remove previously rendered items without touching the empty-state node.
+    this.clearItems();
+
+    // Nothing to show: reveal the empty state and stop.
+    if (!Array.isArray(transactions) || transactions.length === 0) {
+      this.showEmptyState();
+      return;
+    }
+
+    // Build all elements off-DOM, then append once for a single reflow.
+    const fragment = document.createDocumentFragment();
+    for (const transaction of transactions) {
+      fragment.appendChild(this.createTransactionElement(transaction));
+    }
+
+    this.container.appendChild(fragment);
+    this.hideEmptyState();
+  }
+
+  /**
+   * Remove all rendered transaction items from the container.
+   *
+   * Deliberately leaves the empty-state element in place so its reference
+   * stays valid and show/hide continues to work after a re-render.
+   *
+   * @returns {void}
+   */
+  clearItems() {
+    if (!this.container) {
+      return;
+    }
+
+    const items = this.container.querySelectorAll('.transaction-item');
+    items.forEach((item) => item.remove());
+  }
+
+  /**
+   * Insert a single new transaction at the top of the list.
+   *
+   * Optimized path used after an add so the whole list need not re-render.
+   * Newest transactions appear first, so the element is prepended.
+   *
+   * @param {object} transaction - The newly created transaction
+   * @returns {void}
+   */
+  addTransaction(transaction) {
+    if (!this.container) {
+      return;
+    }
+
+    const element = this.createTransactionElement(transaction);
+    // Prepend so the newest transaction sits at the top of the list.
+    this.container.insertBefore(element, this.container.firstChild);
+    this.hideEmptyState();
+  }
+
+  /**
+   * Remove a single transaction element from the list by its id.
+   *
+   * Optimized path used after a delete. If no transaction items remain the
+   * empty state is shown again.
+   *
+   * @param {string} transactionId - id of the transaction to remove
+   * @returns {void}
+   */
+  removeTransaction(transactionId) {
+    if (!this.container) {
+      return;
+    }
+
+    // Match on the data-id attribute set in createTransactionElement().
+    const element = this.container.querySelector(
+      `.transaction-item[data-id="${transactionId}"]`
+    );
+    if (element) {
+      element.remove();
+    }
+
+    // Fall back to the empty state once the last item is gone.
+    if (this.container.querySelectorAll('.transaction-item').length === 0) {
+      this.showEmptyState();
+    }
+  }
+
+  /**
+   * Register a single delegated click handler for delete buttons.
+   *
+   * Event delegation on the container means one listener covers every current
+   * and future delete button, avoiding per-item bindings. The click target may
+   * be the button itself or its inner "×" span, so closest() walks up to find
+   * the button and read its data-id.
+   *
+   * @param {(transactionId: string) => void} handler - Called with the id to delete
+   * @returns {void}
+   */
+  onDelete(handler) {
+    if (!this.container || typeof handler !== 'function') {
+      return;
+    }
+
+    this.container.addEventListener('click', (event) => {
+      // closest() handles clicks on the button or its child icon span.
+      const button = event.target.closest('.btn-delete');
+      if (!button || !this.container.contains(button)) {
+        return;
+      }
+
+      const transactionId = button.dataset.id;
+      if (transactionId) {
+        handler(transactionId);
+      }
+    });
+  }
+
+  /**
+   * Show the empty-state message.
+   *
+   * Toggles the `is-hidden` CSS utility class rather than setting an inline
+   * style, keeping presentation in the stylesheet (Req 9.6).
+   *
+   * @returns {void}
+   */
+  showEmptyState() {
+    if (this.emptyState) {
+      this.emptyState.classList.remove('is-hidden');
+    }
+  }
+
+  /**
+   * Hide the empty-state message.
+   *
+   * @returns {void}
+   */
+  hideEmptyState() {
+    if (this.emptyState) {
+      this.emptyState.classList.add('is-hidden');
+    }
+  }
+}
+
+/**
+ * BalanceDisplayComponent
+ *
+ * Renders the running total of spending in the header balance area. This is
+ * the class skeleton only; update(), showLoading(), and clear() are added in
+ * later tasks (10.2–10.4).
+ */
+class BalanceDisplayComponent {
+  /**
+   * @param {string} displayElementId - The id of the balance display element
+   *        (e.g. "balance-amount").
+   */
+  // Placeholder text shown while a balance update is in flight (Req 7.7).
+  static LOADING_PLACEHOLDER = '…';
+
+  // CSS class toggled on the display element during the loading state so the
+  // placeholder can be styled distinctly from a real balance.
+  static LOADING_CLASS = 'balance-loading';
+
+  constructor(displayElementId) {
+    // Reference to the element whose text content shows the formatted total.
+    this.displayElement = document.getElementById(displayElementId);
+  }
+
+  /**
+   * Update the displayed balance from a total in cents.
+   *
+   * The incoming total is already an integer number of cents; formatCurrency()
+   * handles the dollar conversion, thousands separators, and overflow display.
+   * Clears any lingering loading state so a real value replaces the placeholder.
+   *
+   * @param {number} totalCents - Total spending amount in cents
+   * @returns {void}
+   */
+  update(totalCents) {
+    if (!this.displayElement) {
+      return;
+    }
+
+    // Leaving the loading state in case update() follows a showLoading() call.
+    this.displayElement.classList.remove(BalanceDisplayComponent.LOADING_CLASS);
+    this.displayElement.textContent = formatCurrency(totalCents);
+  }
+
+  /**
+   * Show a loading placeholder while a balance refresh is pending.
+   *
+   * Keeps the UI responsive during async work by swapping in a lightweight
+   * placeholder and tagging the element so styling can react (Req 7.7).
+   *
+   * @returns {void}
+   */
+  showLoading() {
+    if (!this.displayElement) {
+      return;
+    }
+
+    this.displayElement.classList.add(BalanceDisplayComponent.LOADING_CLASS);
+    this.displayElement.textContent = BalanceDisplayComponent.LOADING_PLACEHOLDER;
+  }
+
+  /**
+   * Reset the display to a zero balance.
+   *
+   * Used when all transactions have been removed so the header reflects an
+   * empty state (Req 5.6). Routed through formatCurrency(0) so the zero value
+   * matches the formatting of every other displayed amount.
+   *
+   * @returns {void}
+   */
+  clear() {
+    if (!this.displayElement) {
+      return;
+    }
+
+    this.displayElement.classList.remove(BalanceDisplayComponent.LOADING_CLASS);
+    this.displayElement.textContent = formatCurrency(0);
+  }
+}
+
+/**
+ * ChartComponent
+ *
+ * Renders and updates the spending-by-category pie chart using Chart.js, and
+ * toggles an empty-state message when there is no data to show. This is the
+ * class skeleton only; createChartConfig(), initialize(), update(), destroy(),
+ * showEmptyState(), hideEmptyState(), and isInitialized() are added in later
+ * tasks (11.2–11.8).
+ */
+class ChartComponent {
+  /**
+   * @param {string} canvasElementId - The id of the <canvas> element the chart
+   *        renders into (e.g. "expense-chart").
+   */
+  constructor(canvasElementId) {
+    // Reference to the canvas the Chart.js instance draws on.
+    this.canvasElement = document.getElementById(canvasElementId);
+
+    // Holds the active Chart.js instance once created; null until initialized.
+    this.chartInstance = null;
+
+    // Reference to the empty-state message shown when all categories are zero.
+    this.emptyState = document.getElementById('chart-empty-state');
+
+    // Fixed color per category so the pie's slices stay consistent across
+    // renders (matches the category colors defined in design.md and the CSS).
+    this.categoryColors = {
+      Food: '#FF6384',
+      Transport: '#36A2EB',
+      Fun: '#FFCE56',
+    };
+  }
+
+  /**
+   * Returns true when every category total is zero (or the list is empty),
+   * which signals there is nothing to chart and the empty state should show.
+   *
+   * @param {Array<{category: string, totalCents: number}>} categoryTotals
+   * @returns {boolean}
+   */
+  isAllZero(categoryTotals) {
+    if (!Array.isArray(categoryTotals) || categoryTotals.length === 0) {
+      return true;
+    }
+    return categoryTotals.every((entry) => (entry.totalCents || 0) === 0);
+  }
+
+  /**
+   * Builds the Chart.js configuration object for the spending pie chart.
+   * Private helper used by initialize() (Req 6.3, 6.7, 6.8).
+   *
+   * @param {Array<{category: string, totalCents: number}>} categoryTotals
+   * @returns {object} A Chart.js config suitable for `new Chart(ctx, config)`.
+   */
+  createChartConfig(categoryTotals) {
+    // Pull the parallel label/data arrays Chart.js expects, and map each
+    // category to its fixed color (falling back to grey for unknowns).
+    const labels = categoryTotals.map((entry) => entry.category);
+    const data = categoryTotals.map((entry) => entry.totalCents);
+    const backgroundColor = categoryTotals.map(
+      (entry) => this.categoryColors[entry.category] || '#CCCCCC'
+    );
+
+    return {
+      type: 'pie',
+      data: {
+        labels,
+        datasets: [
+          {
+            data,
+            backgroundColor,
+            // White borders keep adjacent slices visually separated.
+            borderColor: '#FFFFFF',
+            borderWidth: 2,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            position: 'bottom',
+          },
+          tooltip: {
+            callbacks: {
+              // Show "<Category>: $12.34 (56.7%)" so the dollar amount and the
+              // share of total spending are both visible on hover. We compute
+              // the percentage here (rather than relying on the datalabels
+              // plugin, which the CDN build does not include).
+              label: (context) => {
+                const cents = context.parsed || 0;
+                const total = context.dataset.data.reduce(
+                  (sum, value) => sum + (value || 0),
+                  0
+                );
+                const percent = total > 0 ? (cents / total) * 100 : 0;
+                return `${context.label}: ${formatCurrency(cents)} (${percent.toFixed(1)}%)`;
+              },
+            },
+          },
+        },
+      },
+    };
+  }
+
+  /**
+   * Creates the Chart.js instance from the given category totals, or shows the
+   * empty state when there is no spending to display (Req 6.1, 6.6).
+   *
+   * @param {Array<{category: string, totalCents: number}>} categoryTotals
+   */
+  initialize(categoryTotals) {
+    // Nothing to chart yet: surface the empty-state message and bail out.
+    if (this.isAllZero(categoryTotals)) {
+      this.showEmptyState();
+      return;
+    }
+
+    this.hideEmptyState();
+
+    const ctx = this.canvasElement.getContext('2d');
+    const config = this.createChartConfig(categoryTotals);
+    this.chartInstance = new Chart(ctx, config);
+  }
+
+  /**
+   * Refreshes the chart in place when data changes, creating or tearing down
+   * the instance as needed to stay in sync with the data (Req 6.4, 6.5).
+   *
+   * @param {Array<{category: string, totalCents: number}>} categoryTotals
+   */
+  update(categoryTotals) {
+    // All spending removed: drop the chart and show the empty state.
+    if (this.isAllZero(categoryTotals)) {
+      this.destroy();
+      this.showEmptyState();
+      return;
+    }
+
+    this.hideEmptyState();
+
+    // No chart yet (e.g. first data after an empty start): build one.
+    if (!this.chartInstance) {
+      this.initialize(categoryTotals);
+      return;
+    }
+
+    // Otherwise mutate the existing chart's data arrays in place and redraw
+    // without animation ('none') for a snappy update.
+    this.chartInstance.data.labels = categoryTotals.map((entry) => entry.category);
+    this.chartInstance.data.datasets[0].data = categoryTotals.map(
+      (entry) => entry.totalCents
+    );
+    this.chartInstance.data.datasets[0].backgroundColor = categoryTotals.map(
+      (entry) => this.categoryColors[entry.category] || '#CCCCCC'
+    );
+    this.chartInstance.update('none');
+  }
+
+  /**
+   * Destroys the active Chart.js instance and releases the reference so the
+   * canvas can be reused (Req 6.4, 6.5).
+   */
+  destroy() {
+    if (this.chartInstance) {
+      this.chartInstance.destroy();
+      this.chartInstance = null;
+    }
+  }
+
+  /**
+   * Hides the canvas and reveals the "no data" message (Req 6.6).
+   *
+   * Visibility is driven by CSS classes rather than inline styles (Req 9.6):
+   * the canvas uses the shared `is-hidden` utility, while the empty-state div
+   * uses its existing `visible` class (CSS: #chart-empty-state.visible shows it
+   * as a flex overlay, hidden otherwise).
+   */
+  showEmptyState() {
+    if (this.canvasElement) {
+      this.canvasElement.classList.add('is-hidden');
+    }
+    if (this.emptyState) {
+      this.emptyState.classList.add('visible');
+    }
+  }
+
+  /**
+   * Reveals the canvas and hides the "no data" message (Req 6.1).
+   */
+  hideEmptyState() {
+    if (this.canvasElement) {
+      this.canvasElement.classList.remove('is-hidden');
+    }
+    if (this.emptyState) {
+      this.emptyState.classList.remove('visible');
+    }
+  }
+
+  /**
+   * @returns {boolean} True once a chart instance exists, false otherwise (Req 6.1).
+   */
+  isInitialized() {
+    return this.chartInstance !== null;
+  }
+}
+
+/**
+ * Coordinates the application's UI: owns the child components, wires up their
+ * event handlers, and keeps every view in sync with the TransactionManager
+ * after any data change (Req 3.1, 5.2, 6.1).
+ */
+class UIManager {
+  /**
+   * @param {TransactionManager} transactionManager - Data layer used for all
+   *   transaction reads/writes and aggregate calculations.
+   */
+  constructor(transactionManager) {
+    this.transactionManager = transactionManager;
+
+    // Child components are created in initialize() (once the DOM is ready),
+    // so they start out null here.
+    this.inputForm = null;
+    this.transactionList = null;
+    this.balanceDisplay = null;
+    this.chartComponent = null;
+
+    // Debounced chart update (Req 7.4). Rapid successive refreshes (e.g. a
+    // burst of adds/deletes) collapse into a single chart redraw after 100ms of
+    // quiet. The chart is the most expensive view to repaint, so only it is
+    // debounced; the balance and list stay immediate so they feel instant.
+    // chartComponent is still null here, so resolve it at call time.
+    this.debouncedChartUpdate = debounce((categoryTotals) => {
+      this.chartComponent.update(categoryTotals);
+    }, 100);
+  }
+
+  /**
+   * Creates the child components, binds their event handlers, wires the global
+   * error banner's close button, and performs the first render (Req 3.1).
+   *
+   * @returns {void}
+   */
+  initialize() {
+    // Instantiate each child component against its DOM element ID.
+    this.inputForm = new InputFormComponent('transaction-form');
+    this.transactionList = new TransactionListComponent('transactions-container');
+    this.balanceDisplay = new BalanceDisplayComponent('balance-amount');
+    this.chartComponent = new ChartComponent('expense-chart');
+
+    // Route component events into our handlers. bind(this) preserves the
+    // UIManager context when the handlers run from the components' listeners.
+    this.inputForm.onSubmit(this.handleFormSubmit.bind(this));
+    this.transactionList.onDelete(this.handleDeleteClick.bind(this));
+
+    // Wire the global error banner's close button to dismiss the error.
+    const errorCloseButton = document.querySelector('#global-error button');
+    if (errorCloseButton) {
+      errorCloseButton.addEventListener('click', () => this.dismissError());
+    }
+
+    // Render the current state so the UI reflects any persisted data.
+    this.refreshAll();
+  }
+
+  /**
+   * Handles a submitted transaction from the input form.
+   * Full implementation added in task 12.3.
+   *
+   * @param {string} itemName
+   * @param {number} amount
+   * @param {string} category
+   * @returns {void}
+   */
+  handleFormSubmit(itemName, amount, category) {
+    // Start from a clean slate so stale messages from a prior attempt do not
+    // linger alongside the new result.
+    this.inputForm.clearValidationErrors();
+
+    // Run the same validation the manager uses so we can surface field-level
+    // errors before attempting to add (Req 1.8).
+    const validation = TransactionManager.validateTransaction(
+      itemName,
+      amount,
+      category
+    );
+    if (!validation.valid) {
+      this.inputForm.showValidationErrors(validation.errors);
+      return;
+    }
+
+    // Attempt to add the transaction. A null result means the add was
+    // unexpectedly rejected (validation already passed above), so treat it as
+    // an unexpected failure rather than a field error.
+    const added = this.transactionManager.addTransaction(
+      itemName,
+      amount,
+      category
+    );
+    if (added === null) {
+      this.showError('Could not add the transaction. Please try again.');
+      return;
+    }
+
+    // addTransaction persists via saveTransactions internally; if that write
+    // failed the transaction still lives in memory. Warn the user that it may
+    // not survive a reload while still showing the newly added entry (Req 2.2).
+    if (!StorageManager.isStorageAvailable()) {
+      this.showError(
+        'Transaction added, but it could not be saved. It may be lost when you reload.'
+      );
+    }
+
+    // Success: reset the form, return focus for rapid entry (Req 1.9), and
+    // re-render everything to reflect the new transaction.
+    this.inputForm.clearForm();
+    this.inputForm.focusFirstInput();
+    this.refreshAll();
+  }
+
+  /**
+   * Handles a delete request for a single transaction (Req 4.2, 4.3, 4.4, 4.6).
+   *
+   * @param {string} transactionId
+   * @returns {void}
+   */
+  handleDeleteClick(transactionId) {
+    // Look up the transaction first so we can name it in the confirm dialog and
+    // bail quietly if the id is unknown (e.g. already removed in another tab).
+    const transaction = this.transactionManager.getTransactionById(transactionId);
+    if (!transaction) {
+      return;
+    }
+
+    // Require explicit confirmation before a destructive delete (Req 4.2).
+    const confirmed = window.confirm(
+      `Delete "${transaction.itemName}" transaction for ${formatCurrency(
+        transaction.amount
+      )}?`
+    );
+    if (!confirmed) {
+      // User cancelled: leave everything untouched (Req 4.3).
+      return;
+    }
+
+    // A false return means the persistence step failed; the manager has already
+    // rolled back the in-memory removal, so re-render to restore the visible
+    // list and tell the user the delete did not take effect (Req 4.6).
+    const deleted = this.transactionManager.deleteTransaction(transactionId);
+    if (!deleted) {
+      this.showError('Could not delete the transaction. Please try again.');
+      this.refreshAll();
+      return;
+    }
+
+    // Success: re-render so the removed transaction disappears and totals and
+    // the chart update accordingly (Req 4.4).
+    this.refreshAll();
+  }
+
+  /**
+   * Re-renders every child component from the current data.
+   * Full implementation added in task 12.5.
+   *
+   * @returns {void}
+   */
+  refreshAll() {
+    // Pull the current data once and fan it out to each child component so the
+    // list, balance, and chart stay in sync from a single source of truth
+    // (Req 3.4, 3.5, 4.7, 4.8, 5.3, 5.4, 6.4, 6.5). Data reads happen here,
+    // outside the rAF callback below, so the frame does only DOM writes.
+    const transactions = this.transactionManager.getTransactions();
+    const totalCents = this.transactionManager.getTotalCents();
+    const categoryTotals = this.transactionManager.getCategoryTotals();
+
+    // Align the DOM-mutating work (full list render + balance update) to the
+    // next animation frame so visual updates land in a single batched paint and
+    // stay smooth (Req 7.1, 7.5). transactionList.render() builds all items in
+    // a DocumentFragment and appends once, so even ~1000 transactions cost a
+    // single reflow (Req 7.6); incremental add/removeTransaction stay O(1)-ish
+    // (prepend / direct node removal) for the optimized paths.
+    requestAnimationFrame(() => {
+      this.transactionList.render(transactions);
+      this.balanceDisplay.update(totalCents);
+    });
+
+    // Chart redraw is the heaviest update, so run it through the debounced
+    // wrapper (Req 7.4) to batch rapid successive refreshes into one redraw.
+    this.debouncedChartUpdate(categoryTotals);
+  }
+
+  /**
+   * Handles cross-tab storage changes for multi-tab synchronization.
+   * Full implementation added in task 12.6.
+   *
+   * @param {StorageEvent} event
+   * @returns {void}
+   */
+  handleStorageChange(event) {
+    // The storage event fires for every key in the origin; ignore any change
+    // that is not our transaction data (Req 2.4).
+    if (!event || event.key !== StorageManager.STORAGE_KEY) {
+      return;
+    }
+
+    // Reload the data another tab wrote, then re-render so this tab reflects
+    // the latest state.
+    this.transactionManager.initialize();
+    this.refreshAll();
+  }
+
+  /**
+   * Displays a global error message by delegating to the shared utility.
+   *
+   * @param {string} message - Error text to show.
+   * @param {number} [duration] - Optional auto-dismiss duration in ms.
+   * @returns {void}
+   */
+  showError(message, duration) {
+    showGlobalError(message, duration);
+  }
+
+  /**
+   * Dismisses the global error banner by delegating to the shared utility.
+   *
+   * @returns {void}
+   */
+  dismissError() {
+    dismissGlobalError();
+  }
+
+  /**
+   * Shows a loading indicator for async operations.
+   * Full implementation added in task 12.9.
+   *
+   * @param {string} [message]
+   * @returns {void}
+   */
+  showLoading(message) {
+    // Lightweight loading state: there is no dedicated spinner element in the
+    // markup and all transaction operations are synchronous, so we simply lock
+    // the form to prevent re-entrant submits while work is in flight (Req 7.7).
+    this.inputForm.setDisabled(true);
+  }
+
+  /**
+   * Hides the loading indicator.
+   * Full implementation added in task 12.9.
+   *
+   * @returns {void}
+   */
+  hideLoading() {
+    // Counterpart to showLoading(): re-enable the form. Kept minimal since the
+    // operations it guards complete synchronously (Req 7.7).
+    this.inputForm.setDisabled(false);
+  }
+}
+
+// ===========================================================================
+// Application initialization and entry point (Task 13)
+// ===========================================================================
+
+// Module-scoped reference to the active UIManager. The storage event listener
+// (task 13.3) needs to reach the running instance, so we hold onto it here once
+// initApp() has wired everything up. Stays null if init fails or is halted.
+let uiManager = null;
+
+/**
+ * Boots the application: verifies Local Storage, builds the data and UI
+ * layers, and performs the first render (Req 8.7, 8.8).
+ *
+ * Loaded via `defer`, so the DOM is already parsed by the time this runs; any
+ * failure is caught, logged, and surfaced to the user via the global error
+ * banner rather than leaving the page in a half-initialized state.
+ *
+ * @returns {void}
+ */
+function initApp() {
+  try {
+    // Local Storage is the sole persistence mechanism. Without it there is no
+    // point creating managers or accepting input, so halt early with the exact
+    // message required by Req 8.7.
+    if (!StorageManager.isStorageAvailable()) {
+      showGlobalError('Local Storage is required for this application to function');
+
+      // Lock the form so the user cannot enter data that can never be saved.
+      const form = document.getElementById('transaction-form');
+      if (form) {
+        const controls = form.querySelectorAll('input, select, button');
+        controls.forEach((control) => {
+          control.disabled = true;
+        });
+      }
+      return;
+    }
+
+    // Build the data layer first: load persisted transactions before any UI
+    // exists so the initial render reflects the saved state.
+    const transactionManager = new TransactionManager(StorageManager);
+    transactionManager.initialize();
+
+    // Build the UI layer on top of the data layer and bind all event handlers.
+    uiManager = new UIManager(transactionManager);
+    uiManager.initialize();
+  } catch (error) {
+    // Any unexpected failure during boot leaves the app unusable; log the
+    // details for debugging and show a friendly message to the user.
+    console.error('Failed to initialize the application:', error);
+    showGlobalError('Something went wrong while starting the application. Please reload the page.');
+  }
+}
+
+// Run initApp as soon as the DOM is ready. With `defer` the document is
+// normally already parsed, but guard with a readyState check so the entry point
+// is safe regardless of how the script ends up being loaded.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initApp);
+} else {
+  initApp();
+}
+
+/**
+ * Global safety net for uncaught runtime errors (Req 2.2, 8.7). Logs the
+ * error for debugging and shows a single generic message so repeated errors
+ * do not spam the user with banner updates.
+ */
+window.addEventListener('error', (event) => {
+  console.error('Unexpected error:', event.error || event.message);
+  showGlobalError('An unexpected error occurred. Some features may not work correctly.');
+});
+
+/**
+ * Multi-tab synchronization (Req 2.4). Another tab on the same origin writing
+ * to Local Storage fires a storage event here; forward it to the UIManager so
+ * this tab reloads and re-renders the latest data.
+ */
+window.addEventListener('storage', (event) => {
+  if (uiManager) {
+    uiManager.handleStorageChange(event);
+  }
+});

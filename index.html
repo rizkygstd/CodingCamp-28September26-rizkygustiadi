@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Expense & Budget Visualizer</title>
+    <link rel="stylesheet" href="css/styles.css">
+    <!-- Chart.js 4.x CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <!-- Application JavaScript -->
+    <script src="js/app.js" defer></script>
+</head>
+<body>
+    <!-- Header section with balance display -->
+    <header id="balance-section">
+        <h1>Total Spending</h1>
+        <div id="balance-amount" aria-live="polite">$0.00</div>
+        <!--
+          Theme toggle. JS (ThemeManager) corrects aria-pressed and the icon on
+          load based on the saved/OS preference; the markup starts in the
+          light-theme default. The icon span is decorative (aria-hidden) since
+          the aria-label already describes the control.
+        -->
+        <button id="theme-toggle" type="button" aria-label="Toggle dark mode" aria-pressed="false">
+            <span class="theme-toggle-icon" aria-hidden="true">🌙</span>
+        </button>
+    </header>
+    
+    <!-- Main content area -->
+    <main>
+        <!-- Input form section -->
+        <section aria-label="Add new transaction">
+            <form id="transaction-form" aria-label="Add transaction">
+                <div class="form-group">
+                    <label for="item-name">Item Name</label>
+                    <input 
+                        type="text" 
+                        id="item-name" 
+                        name="itemName"
+                        maxlength="100"
+                        required
+                        aria-describedby="item-name-error"
+                    />
+                    <span class="error-message" id="item-name-error" role="alert"></span>
+                </div>
+                
+                <div class="form-group">
+                    <label for="amount">Amount ($)</label>
+                    <input 
+                        type="number" 
+                        id="amount" 
+                        name="amount"
+                        step="0.01"
+                        min="0.01"
+                        max="999999.99"
+                        required
+                        aria-describedby="amount-error"
+                    />
+                    <span class="error-message" id="amount-error" role="alert"></span>
+                </div>
+                
+                <div class="form-group">
+                    <label for="category">Category</label>
+                    <select id="category" name="category" required aria-describedby="category-error">
+                        <option value="">Select category</option>
+                        <option value="Food">Food</option>
+                        <option value="Transport">Transport</option>
+                        <option value="Fun">Fun</option>
+                    </select>
+                    <span class="error-message" id="category-error" role="alert"></span>
+                </div>
+                
+                <button type="submit" class="btn-primary">Add Transaction</button>
+            </form>
+        </section>
+        
+        <!-- Transaction list section -->
+        <section aria-label="Transaction history">
+            <h2>Transactions</h2>
+            <div id="transactions-container">
+                <!-- Empty state -->
+                <p id="empty-state" class="empty-state">
+                    No transactions yet. Add your first expense above!
+                </p>
+            </div>
+        </section>
+        
+        <!-- Chart section -->
+        <section aria-label="Spending distribution chart">
+            <!--
+              A bare <canvas> is invisible to screen readers. role="img" plus a
+              descriptive aria-label gives assistive tech a text alternative for
+              the pie chart (Req 10.10). The empty-state div is kept in the a11y
+              tree so SR users are told what to do when there is no data yet.
+            -->
+            <canvas
+                id="expense-chart"
+                role="img"
+                aria-label="Pie chart showing spending breakdown by category"
+            ></canvas>
+            <div id="chart-empty-state">Add transactions to see spending breakdown</div>
+        </section>
+    </main>
+    
+    <!-- Global error banner -->
+    <div id="global-error" class="is-hidden" role="alert">
+        <span aria-hidden="true">⚠️</span>
+        <span id="error-message"></span>
+        <button aria-label="Dismiss error">×</button>
+    </div>
+</body>
+</html>
