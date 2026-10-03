@@ -1725,6 +1725,86 @@ class TransactionListComponent {
    * Remove a single transaction element from the list by its id.
    *
    * Optimized path used after a delete. If no transaction items remain the
+   * empty state is shown again.
+   *
+   * @param {string} transactionId - id of the transaction to remove
+   * @returns {void}
+   */
+  removeTransaction(transactionId) {
+    if (!this.container) {
+      return;
+    }
+
+    // Match on the data-id attribute set in createTransactionElement().
+    const element = this.container.querySelector(
+      `.transaction-item[data-id="${transactionId}"]`
+    );
+    if (element) {
+      element.remove();
+    }
+
+    // Fall back to the empty state once the last item is gone.
+    if (this.container.querySelectorAll('.transaction-item').length === 0) {
+      this.showEmptyState();
+    }
+  }
+
+  /**
+   * Register a single delegated click handler for delete buttons.
+   *
+   * Event delegation on the container means one listener covers every current
+   * and future delete button, avoiding per-item bindings. The click target may
+   * be the button itself or its inner "×" span, so closest() walks up to find
+   * the button and read its data-id.
+   *
+   * @param {(transactionId: string) => void} handler - Called with the id to delete
+   * @returns {void}
+   */
+  onDelete(handler) {
+    if (!this.container || typeof handler !== 'function') {
+      return;
+    }
+
+    this.container.addEventListener('click', (event) => {
+      // closest() handles clicks on the button or its child icon span.
+      const button = event.target.closest('.btn-delete');
+      if (!button || !this.container.contains(button)) {
+        return;
+      }
+
+      const transactionId = button.dataset.id;
+      if (transactionId) {
+        handler(transactionId);
+      }
+    });
+  }
+
+  /**
+   * Show the empty-state message.
+   *
+   * Toggles the `is-hidden` CSS utility class rather than setting an inline
+   * style, keeping presentation in the stylesheet (Req 9.6).
+   *
+   * @returns {void}
+   */
+  showEmptyState() {
+    if (this.emptyState) {
+      this.emptyState.classList.remove('is-hidden');
+    }
+  }
+
+  /**
+   * Hide the empty-state message.
+   *
+   * @returns {void}
+   */
+  hideEmptyState() {
+    if (this.emptyState) {
+      this.emptyState.classList.add('is-hidden');
+    }
+  }
+}
+
 /**
  * MonthlySummaryComponent
  *
@@ -1884,86 +1964,6 @@ class MonthlySummaryComponent {
    *
    * Toggles the `is-hidden` CSS utility class rather than setting an inline
    * style, keeping presentation in the stylesheet.
-   *
-   * @returns {void}
-   */
-  showEmptyState() {
-    if (this.emptyState) {
-      this.emptyState.classList.remove('is-hidden');
-    }
-  }
-
-  /**
-   * Hide the empty-state message.
-   *
-   * @returns {void}
-   */
-  hideEmptyState() {
-    if (this.emptyState) {
-      this.emptyState.classList.add('is-hidden');
-    }
-  }
-}
-
-/**
- * BalanceDisplayComponent
- *
- * Renders the running total of spending in the header balance area. This is
-   */
-  removeTransaction(transactionId) {
-    if (!this.container) {
-      return;
-    }
-
-    // Match on the data-id attribute set in createTransactionElement().
-    const element = this.container.querySelector(
-      `.transaction-item[data-id="${transactionId}"]`
-    );
-    if (element) {
-      element.remove();
-    }
-
-    // Fall back to the empty state once the last item is gone.
-    if (this.container.querySelectorAll('.transaction-item').length === 0) {
-      this.showEmptyState();
-    }
-  }
-
-  /**
-   * Register a single delegated click handler for delete buttons.
-   *
-   * Event delegation on the container means one listener covers every current
-   * and future delete button, avoiding per-item bindings. The click target may
-   * be the button itself or its inner "×" span, so closest() walks up to find
-   * the button and read its data-id.
-   *
-   * @param {(transactionId: string) => void} handler - Called with the id to delete
-   * @returns {void}
-   */
-  onDelete(handler) {
-    if (!this.container || typeof handler !== 'function') {
-      return;
-    }
-
-    this.container.addEventListener('click', (event) => {
-      // closest() handles clicks on the button or its child icon span.
-      const button = event.target.closest('.btn-delete');
-      if (!button || !this.container.contains(button)) {
-        return;
-      }
-
-      const transactionId = button.dataset.id;
-      if (transactionId) {
-        handler(transactionId);
-      }
-    });
-  }
-
-  /**
-   * Show the empty-state message.
-   *
-   * Toggles the `is-hidden` CSS utility class rather than setting an inline
-   * style, keeping presentation in the stylesheet (Req 9.6).
    *
    * @returns {void}
    */
@@ -2385,6 +2385,9 @@ class UIManager {
   /**
    * Creates the child components, binds their event handlers, wires the global
    * error banner's close button, and performs the first render (Req 3.1).
+   *
+   * @returns {void}
+   */
   initialize() {
     // Shared category color resolver passed into the color-aware components so
     // badges and chart slices stay in sync with CategoryManager.
@@ -2988,11 +2991,10 @@ function initApp() {
         });
       }
 
-      // Theming does not depend on storage: still apply the OS preference and
-      // allow in-session toggling (ThemeManager.saveTheme() is guarded and
-      // simply no-ops when storage is blocked). The toggle lives in the header,
-      // outside the locked form, so it stays usable.
-      ThemeManager.init();
+      // Theming does not depend on storage; the finally block below applies
+      // the OS preference and binds the toggle (ThemeManager.saveTheme() is
+      // guarded and no-ops when storage is blocked). The toggle lives in the
+      // header, outside the locked form, so it stays usable.
       return;
     }
 
@@ -3010,16 +3012,22 @@ function initApp() {
     // Build the UI layer on top of the data layer and bind all event handlers.
     uiManager = new UIManager(transactionManager, categoryManager);
     uiManager.initialize();
-
-    // Initialize theming after the UI (and chart) exist so the initial theme
-    // apply can refresh an already-built chart, keeping a dark first-load chart
-    // readable immediately.
-    ThemeManager.init();
   } catch (error) {
     // Any unexpected failure during boot leaves the app unusable; log the
     // details for debugging and show a friendly message to the user.
     console.error('Failed to initialize the application:', error);
     showGlobalError('Something went wrong while starting the application. Please reload the page.');
+  } finally {
+    // Theming is independent of the rest of the boot: initialize it even when
+    // the main UI init above fails, so the dark/light toggle always works (it
+    // applies the saved/OS theme and binds the toggle click). Guarded so a
+    // theming failure can never mask or worsen a prior error. When the chart
+    // exists, ThemeManager.init() also refreshes it to match the active theme.
+    try {
+      ThemeManager.init();
+    } catch (themeError) {
+      console.error('Theme initialization failed:', themeError);
+    }
   }
 }
 

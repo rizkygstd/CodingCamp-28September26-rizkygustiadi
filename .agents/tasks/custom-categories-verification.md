@@ -16,6 +16,25 @@ or test runner in the repo (vanilla JS, Chart.js via CDN). I therefore could
 If a reviewer has Node/Python, the plan's console assertions (items 1–2) can be
 pasted into DevTools after `python -m http.server 8000`.
 
+## Iteration 2 — review fix
+
+Review (`custom-categories-review.json`, verdict `CHANGES_REQUESTED`) raised one
+blocking finding: the JSDoc block above `UIManager.initialize()` (app.js ~line
+2388) was missing its closing lines (`*`, `@returns {void}`, `*/`), so the
+comment swallowed the whole `initialize()` method. `UIManager.prototype.initialize`
+was never defined, `initApp()` threw `TypeError` at boot, and the app showed the
+generic error banner and never rendered.
+
+Fix applied: restored the `*`, `@returns {void}`, and `*/` terminator lines
+immediately before `initialize() {`. `initialize()` is now a real method again.
+
+Verified by execution: block-comment markers in `js/app.js` are balanced
+(`/*` count = `*/` count = 121, ran via PowerShell regex match count), confirming
+no comment runs unterminated into surrounding code. (Node/Python/browser still
+unavailable on this machine, so no runtime load; the comment-balance count is the
+executable check that directly targets this defect class, which brace-balance
+could not catch.)
+
 ## Verified by execution
 
 - Brace balance of `js/app.js`: `{` count = `}` count = 554 (ran via
