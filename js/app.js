@@ -491,10 +491,17 @@ class CategoryManager {
     }
 
     const trimmed = name.trim();
-    // Assign the next color by custom-category count, cycling the palette.
+    // Assign the next color from the distinct-hue portion of the palette. The
+    // first three entries mirror the built-in colors (red/blue/purple), so
+    // custom categories start at index 3 and cycle the remaining five hues,
+    // keeping customs visually distinct from the built-ins.
+    const distinctHueStart = CategoryManager.BUILT_INS.length;
+    const distinctHueCount =
+      CategoryManager.PALETTE.length - distinctHueStart;
     const color =
       CategoryManager.PALETTE[
-        this.customCategories.length % CategoryManager.PALETTE.length
+        distinctHueStart +
+          (this.customCategories.length % distinctHueCount)
       ];
 
     this.customCategories.push({ name: trimmed, color });
