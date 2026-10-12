@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>full verify</title>
+<link rel="stylesheet" href="css/styles.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+  // Capture ALL errors before app.js loads.
+  window.__errs = [];
+  window.addEventListener('error', function (e) {
+    window.__errs.push('ONERROR: ' + (e.message || '') + ' @ ' + (e.filename || '') + ':' + (e.lineno || '') + ':' + (e.colno || '') + (e.error && e.error.stack ? '\nSTACK: ' + e.error.stack : ''));
+  });
+  // Seed multi-month transactions so chart + summary have data (chartInstance exists).
+  var tOct = new Date(2026, 9, 15, 12, 0, 0).getTime();
+  var tOct2 = new Date(2026, 9, 20, 9, 0, 0).getTime();
+  var tSep = new Date(2026, 8, 10, 8, 0, 0).getTime();
+  localStorage.setItem('expense-tracker-transactions', JSON.stringify({
+    version: '1.0',
+    transactions: [
+      { id: 'a', itemName: 'Lunch', amount: 1250, category: 'Food', timestamp: tOct },
+      { id: 'b', itemName: 'Bus', amount: 300, category: 'Transport', timestamp: tOct2 },
+      { id: 'c', itemName: 'Movie', amount: 1500, category: 'Fun', timestamp: tSep },
+      { id: 'd', itemName: 'Snacks', amount: 500, category: 'Food', timestamp: tSep }
+    ]
+  }));
+  localStorage.removeItem('expense-tracker-theme'); // start light
+</script>
+<script src="js/app.js" defer></script>
+</head>
+<body>
+<header id="balance-section">
+  <h1>Total Spending</h1>
+  <div id="balance-amount" aria-live="polite">$0.00</div>
+  <button id="theme-toggle" type="button" aria-label="Toggle dark mode" aria-pressed="false">
+    <span class="theme-toggle-icon" aria-hidden="true">🌙</span>
+  </button>
+</header>
+<main>
+  <section aria-label="Add new transaction">
+    <form id="transaction-form" aria-label="Add transaction">
+      <div class="form-group">
+        <label for="item-name">Item Name</label>
+        <input type="text" id="item-name" name="itemName" maxlength="100" required aria-describedby="item-name-error" />
+        <span class="error-message" id="item-name-error" role="alert"></span>
+      </div>
+      <div class="form-group">
+        <label for="amount">Amount ($)</label>
+        <input type="number" id="amount" name="amount" step="0.01" min="0.01" max="999999.99" required aria-describedby="amount-error" />
+        <span class="error-message" id="amount-error" role="alert"></span>
+      </div>
+      <div class="form-group">
+        <label for="category">Category</label>
+        <select id="category" name="category" required aria-describedby="category-error">
+          <option value="">Select category</option>
+        </select>
+        <span class="error-message" id="category-error" role="alert"></span>
+        <div id="new-category-group" class="new-category-group is-hidden">
+          <label for="new-category-name" class="sr-only">New category name</label>
+          <input type="text" id="new-category-name" name="newCategoryName" maxlength="30" autocomplete="off" aria-describedby="new-category-error" />
+          <div class="new-category-actions">
+            <button type="button" id="new-category-confirm" class="btn-primary new-category-btn">Add</button>
+            <button type="button" id="new-category-cancel" class="btn-secondary new-category-btn">Cancel</button>
+          </div>
+          <span class="error-message" id="new-category-error" role="alert"></span>
+        </div>
+      </div>
+      <button type="submit" class="btn-primary">Add Transaction</button>
+    </form>
+    <div class="category-manage">
+      <button type="button" id="category-manage-toggle" class="btn-secondary" aria-expanded="false" aria-controls="category-manage-panel">Manage categories</button>
+      <div id="category-manage-panel" class="category-manage-panel is-hidden">
+        <div id="category-manage-list"></div>
+        <p id="category-manage-message" class="error-message" role="alert"></p>
+      </div>
+    </div>
+  </section>
+  <section aria-label="Transaction history">
+    <h2>Transactions</h2>
+    <div id="transactions-container">
+      <p id="empty-state" class="empty-state">No transactions yet. Add your first expense above!</p>
+    </div>
+  </section>
+  <section aria-label="Spending distribution chart">
+    <canvas id="expense-chart" role="img" aria-label="Pie chart showing spending breakdown by category"></canvas>
+    <div id="chart-empty-state">Add transactions to see spending breakdown</div>
+  </section>
+  <section aria-label="Monthly spending summary">
+    <h2>Monthly Summary</h2>
+    <div id="monthly-summary-container">
+      <p id="monthly-summary-empty-state" class="empty-state">No transactions yet. Your monthly spending summary will appear here.</p>
+    </div>
+  </section>
+</main>
+<div id="global-error" class="is-hidden" role="alert">
+  <span aria-hidden="true">⚠️</span>
+  <span id="error-message"></span>
+  <button aria-label="Dismiss error">×</button>
+</div>
+<div id="log"></div>
+<script>
+  setTimeout(function () {
+    var log = document.getElementById('log');
+    var lines = [];
+    function snapshot(tag) {
+      var banner = document.getElementById('global-error');
+      lines.push(tag + ' | theme=' + ThemeManager.getCurrentTheme()
+        + ' | bannerHidden=' + banner.classList.contains('is-hidden')
+        + ' | bannerText="' + document.getElementById('error-message').textContent + '"'
+        + ' | errCount=' + window.__errs.length);
+    }
+    try {
+      snapshot('after-load');
+      lines.push('chartInitialized=' + (uiManager.chartComponent && uiManager.chartComponent.isInitialized()));
+      var cards = document.querySelectorAll('.monthly-summary-month');
+      lines.push('summaryCards=' + cards.length);
+      if (cards.length) {
+        lines.push('card0 label=' + cards[0].querySelector('.monthly-summary-label').textContent
+          + ' total=' + cards[0].querySelector('.monthly-summary-total').textContent);
+        lines.push('card1 label=' + cards[1].querySelector('.monthly-summary-label').textContent
+          + ' total=' + cards[1].querySelector('.monthly-summary-total').textContent);
+      }
+      document.getElementById('theme-toggle').click();
+      snapshot('after-toggle-dark');
+      document.getElementById('theme-toggle').click();
+      snapshot('after-toggle-light');
+    } catch (ex) {
+      lines.push('SYNC_THROW: ' + ex.message + '\n' + ex.stack);
+    }
+    window.__errs.forEach(function (e) { lines.push(e); });
+    log.textContent = 'FULL_RESULT\n' + lines.join('\n');
+  }, 1500);
+</script>
+</body>
+</html>

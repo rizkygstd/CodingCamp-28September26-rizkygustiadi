@@ -742,8 +742,17 @@ class ThemeManager {
    */
   static toggle() {
     const next = ThemeManager.getCurrentTheme() === 'dark' ? 'light' : 'dark';
+
+    // Switching and persisting the theme must always succeed from the user's
+    // point of view, so they run first and are not gated on the chart refresh.
     ThemeManager.applyTheme(next);
     ThemeManager.saveTheme(next);
+
+    // The chart recolor runs through Chart.js (a cross-origin CDN script); if
+    // its internal update throws, we must not let that bubble to the global
+    // window.onerror handler and show the user an error banner for a cosmetic
+    // chart refresh. refreshChart() contains its own guard, so the theme toggle
+    // stays reliable regardless of the chart's state.
     ThemeManager.refreshChart();
   }
 
@@ -755,8 +764,19 @@ class ThemeManager {
    * @returns {void}
    */
   static refreshChart() {
-    if (uiManager && uiManager.chartComponent) {
+    // Null-guard the component chain so a toggle before the UI is wired (or
+    // after a teardown) is a quiet no-op rather than a thrown reference error.
+    if (!uiManager || !uiManager.chartComponent) {
+      return;
+    }
+
+    try {
       uiManager.chartComponent.refreshTheme();
+    } catch (error) {
+      // A failure to recolor the chart is purely cosmetic. Swallow it (logging
+      // for debugging) so it can never surface the global error banner; the
+      // theme has already switched and persisted by this point.
+      console.error('Could not refresh chart colors for the new theme:', error);
     }
   }
 
